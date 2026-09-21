@@ -9,6 +9,7 @@ from sqlalchemy import (
     DateTime,
     Enum,
     ForeignKey,
+    CheckConstraint,
     Index,
     Integer,
     String,
@@ -18,6 +19,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from ppt_agent.domain.state_machine import PageStatus, RunStatus, StepStatus
+from ppt_agent.domain.costs import ReservationStatus
 
 
 class Base(DeclarativeBase):
@@ -166,4 +168,95 @@ class WorkflowEventRecord(Base):
         nullable=False,
         server_default=func.current_timestamp(),
     )
+
+
+class BudgetAccountRecord(TimestampMixin, Base):
+    __tablename__ = "budget_accounts"
+    __table_args__ = (
+        UniqueConstraint(
+            "project_id", "stage", "currency", name="uq_budget_project_stage_currency"
+        ),
+        CheckConstraint("hard_limit >= 0", name="ck_budget_hard_limit_nonnegative"),
+        CheckConstraint(
+            "soft_limit IS NULL OR (soft_limit >= 0 AND soft_limit <= hard_limit)",
+            name="ck_budget_soft_limit_range",
+        ),
+        CheckConstraint("settled >= 0", name="ck_budget_settled_nonnegative"),
+        CheckConstraint(
+            "active_reserved >= 0", name="ck_budget_active_reserved_nonnegative"
+        ),
+        CheckConstraint(
+            "held_unknown >= 0", name="ck_budget_held_unknown_nonnegative"
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    stage: Mapped[str] = mapped_column(String(100), nullable=False)
+    currency: Mapped[str] = mapped_column(String(3), nullable=False)
+    hard_limit: Mapped[int] = mapped_column(Integer, nullable=False)
+    soft_limit: Mapped[int | None] = mapped_column(Integer)
+    settled: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    active_reserved: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    held_unknown: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+
+class CostReservationRecord(TimestampMixin, Base):
+    __tablename__ = "cost_reservations"
+    __table_args__ = (
+        CheckConstraint(
+            "amount_reserved > 0", name="ck_reservation_amount_positive"
+        ),
+        CheckConstraint(
+            "amount_settled >= 0", name="ck_reservation_settled_nonnegative"
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    account_id: Mapped[str] = mapped_column(
+        ForeignKey("budget_accounts.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    stage: Mapped[str] = mapped_column(String(100), nullable=False)
+    operation_id: Mapped[str] = mapped_column(String(100), nullable=False, unique=True)
+    amount_reserved: Mapped[int] = mapped_column(Integer, nullable=False)
+    amount_settled: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    budget_deviation: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    currency: Mapped[str] = mapped_column(String(3), nullable=False)
+    pricing_version: Mapped[str] = mapped_column(String(100), nullable=False)
+    status: Mapped[ReservationStatus] = mapped_column(
+        enum_type(ReservationStatus, "reservation_status"), nullable=False
+    )
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class UsageRecord(TimestampMixin, Base):
+    __tablename__ = "usage_records"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    usage_key: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
+    reservation_id: Mapped[str] = mapped_column(
+        ForeignKey("cost_reservations.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    operation_id: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    attempt_id: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    provider: Mapped[str] = mapped_column(String(100), nullable=False)
+    model: Mapped[str] = mapped_column(String(150), nullable=False)
+    input_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    output_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    image_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    dimensions: Mapped[str | None] = mapped_column(String(50))
+    estimated_amount: Mapped[int] = mapped_column(Integer, nullable=False)
+    actual_amount: Mapped[int] = mapped_column(Integer, nullable=False)
+    currency: Mapped[str] = mapped_column(String(3), nullable=False)
+    pricing_version: Mapped[str] = mapped_column(String(100), nullable=False)
+    raw_units: Mapped[dict[str, Any] | None] = mapped_column(JSON)
 

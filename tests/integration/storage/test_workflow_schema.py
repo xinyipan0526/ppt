@@ -40,6 +40,9 @@ def test_initial_migration_creates_workflow_runtime_tables() -> None:
         "pages",
         "workflow_interrupts",
         "workflow_events",
+        "budget_accounts",
+        "cost_reservations",
+        "usage_records",
     }
     assert set(Base.metadata.tables) == tables - {"alembic_version"}
 
