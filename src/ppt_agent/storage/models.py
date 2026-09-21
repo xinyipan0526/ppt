@@ -6,6 +6,7 @@ from typing import Any
 
 from sqlalchemy import (
     JSON,
+    Boolean,
     DateTime,
     Enum,
     ForeignKey,
@@ -20,6 +21,8 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from ppt_agent.domain.state_machine import PageStatus, RunStatus, StepStatus
 from ppt_agent.domain.costs import ReservationStatus
+from ppt_agent.domain.providers import OperationAggregateStatus
+from ppt_agent.domain.state_machine import AttemptStatus
 
 
 class Base(DeclarativeBase):
@@ -224,7 +227,8 @@ class CostReservationRecord(TimestampMixin, Base):
         ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True
     )
     stage: Mapped[str] = mapped_column(String(100), nullable=False)
-    operation_id: Mapped[str] = mapped_column(String(100), nullable=False, unique=True)
+    operation_id: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    reservation_key: Mapped[str] = mapped_column(String(150), nullable=False, unique=True)
     amount_reserved: Mapped[int] = mapped_column(Integer, nullable=False)
     amount_settled: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     budget_deviation: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
@@ -260,3 +264,78 @@ class UsageRecord(TimestampMixin, Base):
     pricing_version: Mapped[str] = mapped_column(String(100), nullable=False)
     raw_units: Mapped[dict[str, Any] | None] = mapped_column(JSON)
 
+
+class ProviderOperationRecord(TimestampMixin, Base):
+    __tablename__ = "provider_operations"
+
+    id: Mapped[str] = mapped_column(String(100), primary_key=True)
+    operation_kind: Mapped[str] = mapped_column(String(100), nullable=False)
+    request_fingerprint: Mapped[str] = mapped_column(String(255), nullable=False)
+    provider: Mapped[str] = mapped_column(String(100), nullable=False)
+    model: Mapped[str] = mapped_column(String(150), nullable=False)
+    aggregate_status: Mapped[OperationAggregateStatus] = mapped_column(
+        enum_type(OperationAggregateStatus, "operation_aggregate_status"),
+        nullable=False,
+    )
+    selected_attempt_id: Mapped[str | None] = mapped_column(String(100))
+    has_unknown_attempts: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False
+    )
+
+
+class ProviderAttemptRecord(TimestampMixin, Base):
+    __tablename__ = "provider_attempts"
+    __table_args__ = (
+        UniqueConstraint(
+            "operation_id", "attempt_no", name="uq_attempt_operation_number"
+        ),
+        UniqueConstraint("reservation_id", name="uq_attempt_reservation"),
+    )
+
+    id: Mapped[str] = mapped_column(String(100), primary_key=True)
+    operation_id: Mapped[str] = mapped_column(
+        ForeignKey("provider_operations.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    attempt_no: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[AttemptStatus] = mapped_column(
+        enum_type(AttemptStatus, "provider_attempt_status"), nullable=False
+    )
+    idempotency_key: Mapped[str | None] = mapped_column(String(255))
+    provider_job_id: Mapped[str | None] = mapped_column(String(255), index=True)
+    reservation_id: Mapped[str] = mapped_column(
+        ForeignKey("cost_reservations.id", ondelete="RESTRICT"), nullable=False
+    )
+    request_started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+    response_received_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+    usage_record_id: Mapped[str | None] = mapped_column(
+        ForeignKey("usage_records.id", ondelete="SET NULL")
+    )
+    error_code: Mapped[str | None] = mapped_column(String(100))
+    response_summary: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+
+
+class ProviderRetryAuthorizationRecord(TimestampMixin, Base):
+    __tablename__ = "provider_retry_authorizations"
+    __table_args__ = (
+        UniqueConstraint(
+            "operation_id",
+            "unknown_attempt_id",
+            name="uq_retry_authorization_unknown_attempt",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    operation_id: Mapped[str] = mapped_column(
+        ForeignKey("provider_operations.id", ondelete="CASCADE"), nullable=False
+    )
+    unknown_attempt_id: Mapped[str] = mapped_column(
+        ForeignKey("provider_attempts.id", ondelete="CASCADE"), nullable=False
+    )
+    acknowledgement: Mapped[str] = mapped_column(String(1000), nullable=False)
+    consumed_by_attempt_id: Mapped[str | None] = mapped_column(String(100))

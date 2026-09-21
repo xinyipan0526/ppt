@@ -86,6 +86,7 @@ class BudgetAccountSnapshot:
 class ReservationSnapshot:
     id: str
     account_id: str
+    reservation_key: str
     operation_id: str
     amount_reserved: int
     amount_settled: int
@@ -116,7 +117,7 @@ class CostLedger:
             raise ValueError("soft_limit must be between zero and hard_limit")
 
         with session_scope(self._sessions) as session:
-            self._begin_immediate(session)
+            self.begin_write_transaction(session)
             record = BudgetAccountRecord(
                 id=str(uuid4()),
                 project_id=project_id,
@@ -149,55 +150,87 @@ class CostLedger:
             raise ValueError("reservation amount must be positive")
 
         with session_scope(self._sessions) as session:
-            self._begin_immediate(session)
-            existing = session.scalar(
-                select(CostReservationRecord).where(
-                    CostReservationRecord.operation_id == operation_id
-                )
-            )
-            if existing is not None:
-                if (
-                    existing.account_id != account_id
-                    or existing.amount_reserved != amount
-                    or existing.currency != currency
-                    or existing.pricing_version != pricing_version
-                ):
-                    raise ReservationConflict(
-                        "operation already has a different reservation"
-                    )
-                return self._reservation_snapshot(existing)
-
-            account = self._require_account(session, account_id)
-            if account.currency != currency:
-                raise CurrencyMismatch(
-                    f"account uses {account.currency}, reservation uses {currency}"
-                )
-            committed = (
-                account.settled + account.active_reserved + account.held_unknown
-            )
-            if committed + amount > account.hard_limit:
-                raise BudgetExceeded(
-                    f"reservation would exceed hard limit by "
-                    f"{committed + amount - account.hard_limit} {currency} minor units"
-                )
-
-            account.active_reserved += amount
-            record = CostReservationRecord(
-                id=str(uuid4()),
-                account_id=account.id,
-                project_id=account.project_id,
-                stage=account.stage,
+            self.begin_write_transaction(session)
+            return self.reserve_in_transaction(
+                session,
+                account_id=account_id,
+                reservation_key=operation_id,
                 operation_id=operation_id,
-                amount_reserved=amount,
-                amount_settled=0,
-                budget_deviation=0,
+                amount=amount,
                 currency=currency,
                 pricing_version=pricing_version,
-                status=ReservationStatus.ACTIVE,
             )
-            session.add(record)
-            session.flush()
-            return self._reservation_snapshot(record)
+
+    def reserve_in_transaction(
+        self,
+        session: Session,
+        *,
+        account_id: str,
+        reservation_key: str,
+        operation_id: str,
+        amount: int,
+        currency: str,
+        pricing_version: str,
+    ) -> ReservationSnapshot:
+        """Reserve funds inside a caller-owned immediate write transaction."""
+
+        _validate_currency(currency)
+        if amount <= 0:
+            raise ValueError("reservation amount must be positive")
+        existing = session.scalar(
+            select(CostReservationRecord).where(
+                CostReservationRecord.reservation_key == reservation_key
+            )
+        )
+        if existing is not None:
+            if (
+                existing.account_id != account_id
+                or existing.operation_id != operation_id
+                or existing.amount_reserved != amount
+                or existing.currency != currency
+                or existing.pricing_version != pricing_version
+            ):
+                raise ReservationConflict(
+                    "reservation key already has different parameters"
+                )
+            return self._reservation_snapshot(existing)
+
+        account = self._require_account(session, account_id)
+        if account.currency != currency:
+            raise CurrencyMismatch(
+                f"account uses {account.currency}, reservation uses {currency}"
+            )
+        committed = account.settled + account.active_reserved + account.held_unknown
+        if committed + amount > account.hard_limit:
+            raise BudgetExceeded(
+                f"reservation would exceed hard limit by "
+                f"{committed + amount - account.hard_limit} {currency} minor units"
+            )
+
+        account.active_reserved += amount
+        record = CostReservationRecord(
+            id=str(uuid4()),
+            account_id=account.id,
+            project_id=account.project_id,
+            stage=account.stage,
+            reservation_key=reservation_key,
+            operation_id=operation_id,
+            amount_reserved=amount,
+            amount_settled=0,
+            budget_deviation=0,
+            currency=currency,
+            pricing_version=pricing_version,
+            status=ReservationStatus.ACTIVE,
+        )
+        session.add(record)
+        session.flush()
+        return self._reservation_snapshot(record)
+
+    def get_reservation(self, reservation_id: str) -> ReservationSnapshot:
+        with session_scope(self._sessions) as session:
+            return self._reservation_snapshot(
+                self._require_reservation(session, reservation_id)
+            )
 
     def settle(
         self,
@@ -205,114 +238,127 @@ class CostLedger:
         usage: UsageInput,
     ) -> ReservationSnapshot:
         with session_scope(self._sessions) as session:
-            self._begin_immediate(session)
-            existing_usage = session.scalar(
-                select(UsageRecord).where(UsageRecord.usage_key == usage.usage_key)
-            )
-            if existing_usage is not None:
-                if not self._usage_matches(existing_usage, reservation_id, usage):
-                    raise ReservationConflict(
-                        "usage key already recorded with different values"
-                    )
-                return self._reservation_snapshot(
-                    self._require_reservation(session, reservation_id)
-                )
+            self.begin_write_transaction(session)
+            return self.settle_in_transaction(session, reservation_id, usage)
 
-            reservation = self._require_reservation(session, reservation_id)
-            if reservation.currency != usage.currency:
-                raise CurrencyMismatch(
-                    f"reservation uses {reservation.currency}, usage uses {usage.currency}"
-                )
-            if reservation.pricing_version != usage.pricing_version:
-                raise ReservationConflict("usage pricing version does not match reservation")
-            if reservation.status not in {
-                ReservationStatus.ACTIVE,
-                ReservationStatus.HELD_UNKNOWN,
-            }:
+    def settle_in_transaction(
+        self,
+        session: Session,
+        reservation_id: str,
+        usage: UsageInput,
+    ) -> ReservationSnapshot:
+        existing_usage = session.scalar(
+            select(UsageRecord).where(UsageRecord.usage_key == usage.usage_key)
+        )
+        if existing_usage is not None:
+            if not self._usage_matches(existing_usage, reservation_id, usage):
                 raise ReservationConflict(
-                    f"cannot settle reservation in {reservation.status.value}"
+                    "usage key already recorded with different values"
                 )
+            return self._reservation_snapshot(
+                self._require_reservation(session, reservation_id)
+            )
 
-            account = self._require_account(session, reservation.account_id)
-            if reservation.status is ReservationStatus.ACTIVE:
-                account.active_reserved -= reservation.amount_reserved
-            else:
-                account.held_unknown -= reservation.amount_reserved
-            account.settled += usage.actual_amount
+        reservation = self._require_reservation(session, reservation_id)
+        if reservation.currency != usage.currency:
+            raise CurrencyMismatch(
+                f"reservation uses {reservation.currency}, usage uses {usage.currency}"
+            )
+        if reservation.pricing_version != usage.pricing_version:
+            raise ReservationConflict("usage pricing version does not match reservation")
+        if reservation.status not in {
+            ReservationStatus.ACTIVE,
+            ReservationStatus.HELD_UNKNOWN,
+        }:
+            raise ReservationConflict(
+                f"cannot settle reservation in {reservation.status.value}"
+            )
 
-            reservation.amount_settled = usage.actual_amount
-            reservation.budget_deviation = (
-                usage.actual_amount - reservation.amount_reserved
+        account = self._require_account(session, reservation.account_id)
+        if reservation.status is ReservationStatus.ACTIVE:
+            account.active_reserved -= reservation.amount_reserved
+        else:
+            account.held_unknown -= reservation.amount_reserved
+        account.settled += usage.actual_amount
+        reservation.amount_settled = usage.actual_amount
+        reservation.budget_deviation = usage.actual_amount - reservation.amount_reserved
+        reservation.status = (
+            ReservationStatus.PARTIALLY_SETTLED
+            if usage.actual_amount < reservation.amount_reserved
+            else ReservationStatus.SETTLED
+        )
+        session.add(
+            UsageRecord(
+                id=str(uuid4()),
+                usage_key=usage.usage_key,
+                reservation_id=reservation.id,
+                operation_id=reservation.operation_id,
+                attempt_id=usage.attempt_id,
+                provider=usage.provider,
+                model=usage.model,
+                input_tokens=usage.input_tokens,
+                output_tokens=usage.output_tokens,
+                image_count=usage.image_count,
+                dimensions=usage.dimensions,
+                estimated_amount=usage.estimated_amount,
+                actual_amount=usage.actual_amount,
+                currency=usage.currency,
+                pricing_version=usage.pricing_version,
+                raw_units=usage.raw_units,
             )
-            reservation.status = (
-                ReservationStatus.PARTIALLY_SETTLED
-                if usage.actual_amount < reservation.amount_reserved
-                else ReservationStatus.SETTLED
-            )
-            session.add(
-                UsageRecord(
-                    id=str(uuid4()),
-                    usage_key=usage.usage_key,
-                    reservation_id=reservation.id,
-                    operation_id=reservation.operation_id,
-                    attempt_id=usage.attempt_id,
-                    provider=usage.provider,
-                    model=usage.model,
-                    input_tokens=usage.input_tokens,
-                    output_tokens=usage.output_tokens,
-                    image_count=usage.image_count,
-                    dimensions=usage.dimensions,
-                    estimated_amount=usage.estimated_amount,
-                    actual_amount=usage.actual_amount,
-                    currency=usage.currency,
-                    pricing_version=usage.pricing_version,
-                    raw_units=usage.raw_units,
-                )
-            )
-            session.flush()
-            return self._reservation_snapshot(reservation)
+        )
+        session.flush()
+        return self._reservation_snapshot(reservation)
 
     def release(self, reservation_id: str) -> ReservationSnapshot:
         with session_scope(self._sessions) as session:
-            self._begin_immediate(session)
-            reservation = self._require_reservation(session, reservation_id)
-            if reservation.status is ReservationStatus.RELEASED:
-                return self._reservation_snapshot(reservation)
-            if reservation.status not in {
-                ReservationStatus.ACTIVE,
-                ReservationStatus.HELD_UNKNOWN,
-            }:
-                raise ReservationConflict(
-                    f"cannot release reservation in {reservation.status.value}"
-                )
+            self.begin_write_transaction(session)
+            return self.release_in_transaction(session, reservation_id)
 
-            account = self._require_account(session, reservation.account_id)
-            if reservation.status is ReservationStatus.ACTIVE:
-                account.active_reserved -= reservation.amount_reserved
-            else:
-                account.held_unknown -= reservation.amount_reserved
-            reservation.status = ReservationStatus.RELEASED
+    def release_in_transaction(
+        self, session: Session, reservation_id: str
+    ) -> ReservationSnapshot:
+        reservation = self._require_reservation(session, reservation_id)
+        if reservation.status is ReservationStatus.RELEASED:
             return self._reservation_snapshot(reservation)
+        if reservation.status not in {
+            ReservationStatus.ACTIVE,
+            ReservationStatus.HELD_UNKNOWN,
+        }:
+            raise ReservationConflict(
+                f"cannot release reservation in {reservation.status.value}"
+            )
+        account = self._require_account(session, reservation.account_id)
+        if reservation.status is ReservationStatus.ACTIVE:
+            account.active_reserved -= reservation.amount_reserved
+        else:
+            account.held_unknown -= reservation.amount_reserved
+        reservation.status = ReservationStatus.RELEASED
+        return self._reservation_snapshot(reservation)
 
     def hold_unknown(self, reservation_id: str) -> ReservationSnapshot:
         with session_scope(self._sessions) as session:
-            self._begin_immediate(session)
-            reservation = self._require_reservation(session, reservation_id)
-            if reservation.status is ReservationStatus.HELD_UNKNOWN:
-                return self._reservation_snapshot(reservation)
-            if reservation.status is not ReservationStatus.ACTIVE:
-                raise ReservationConflict(
-                    f"cannot hold reservation in {reservation.status.value}"
-                )
+            self.begin_write_transaction(session)
+            return self.hold_unknown_in_transaction(session, reservation_id)
 
-            account = self._require_account(session, reservation.account_id)
-            account.active_reserved -= reservation.amount_reserved
-            account.held_unknown += reservation.amount_reserved
-            reservation.status = ReservationStatus.HELD_UNKNOWN
+    def hold_unknown_in_transaction(
+        self, session: Session, reservation_id: str
+    ) -> ReservationSnapshot:
+        reservation = self._require_reservation(session, reservation_id)
+        if reservation.status is ReservationStatus.HELD_UNKNOWN:
             return self._reservation_snapshot(reservation)
+        if reservation.status is not ReservationStatus.ACTIVE:
+            raise ReservationConflict(
+                f"cannot hold reservation in {reservation.status.value}"
+            )
+        account = self._require_account(session, reservation.account_id)
+        account.active_reserved -= reservation.amount_reserved
+        account.held_unknown += reservation.amount_reserved
+        reservation.status = ReservationStatus.HELD_UNKNOWN
+        return self._reservation_snapshot(reservation)
 
     @staticmethod
-    def _begin_immediate(session: Session) -> None:
+    def begin_write_transaction(session: Session) -> None:
         session.execute(text("BEGIN IMMEDIATE"))
 
     @staticmethod
@@ -374,6 +420,7 @@ class CostLedger:
         return ReservationSnapshot(
             id=record.id,
             account_id=record.account_id,
+            reservation_key=record.reservation_key,
             operation_id=record.operation_id,
             amount_reserved=record.amount_reserved,
             amount_settled=record.amount_settled,
@@ -387,4 +434,3 @@ class CostLedger:
 def _validate_currency(currency: str) -> None:
     if len(currency) != 3 or currency.upper() != currency or not currency.isalpha():
         raise ValueError("currency must be a three-letter uppercase code")
-

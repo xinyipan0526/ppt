@@ -28,7 +28,10 @@ def migrated_engine():
 def test_initial_migration_creates_workflow_runtime_tables() -> None:
     engine = migrated_engine()
     try:
-        tables = set(inspect(engine).get_table_names())
+        inspector = inspect(engine)
+        tables = set(inspector.get_table_names())
+        reservation_uniques = inspector.get_unique_constraints("cost_reservations")
+        usage_foreign_keys = inspector.get_foreign_keys("usage_records")
     finally:
         engine.dispose()
 
@@ -43,8 +46,18 @@ def test_initial_migration_creates_workflow_runtime_tables() -> None:
         "budget_accounts",
         "cost_reservations",
         "usage_records",
+        "provider_operations",
+        "provider_attempts",
+        "provider_retry_authorizations",
     }
     assert set(Base.metadata.tables) == tables - {"alembic_version"}
+    assert {tuple(item["column_names"]) for item in reservation_uniques} == {
+        ("reservation_key",)
+    }
+    assert any(
+        foreign_key["referred_table"] == "cost_reservations"
+        for foreign_key in usage_foreign_keys
+    )
 
 
 def test_event_sequence_is_unique_within_a_run() -> None:
