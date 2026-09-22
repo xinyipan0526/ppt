@@ -39,6 +39,7 @@ from ppt_agent.storage.models import (
     WorkflowRunRecord,
     WorkflowStepRecord,
 )
+from ppt_agent.storage.workspace import UnsafeWorkspacePath, WorkspacePaths
 
 
 class ArtifactError(RuntimeError):
@@ -144,14 +145,14 @@ class ArtifactStore:
         if staging_retention < timedelta(0):
             raise ValueError("staging_retention must be non-negative")
         self._sessions = sessions
-        self._workspace = workspace.resolve()
+        self._paths = WorkspacePaths(workspace, create=True)
+        self._workspace = self._paths.root
         self._staging_retention = staging_retention
         self._file_validator = file_validator
-        self._workspace.mkdir(parents=True, exist_ok=True)
-        (self._workspace / ".staging").mkdir(exist_ok=True)
-        (self._workspace / ".orphans").mkdir(exist_ok=True)
-        (self._workspace / ".trash").mkdir(exist_ok=True)
-        (self._workspace / "artifacts").mkdir(exist_ok=True)
+        for relative in (".staging", ".orphans", ".trash", "artifacts"):
+            directory = self._resolve(relative)
+            directory.mkdir(exist_ok=True)
+            self._verify(directory)
 
     def create_staging(self, request: CreateArtifact) -> ArtifactSnapshot:
         self._validate_request(request)
@@ -238,6 +239,7 @@ class ArtifactStore:
                 output.flush()
                 if durable:
                     os.fsync(output.fileno())
+            self._verify(staging)
             content_hash = f"sha256:{digest.hexdigest()}"
             if expected_hash is not None and content_hash != expected_hash:
                 raise ArtifactIntegrityError(
@@ -259,7 +261,10 @@ class ArtifactStore:
                 session.flush()
                 return self._snapshot(record)
         except BaseException:
-            staging.unlink(missing_ok=True)
+            try:
+                self._safe_unlink(staging)
+            except ArtifactIntegrityError:
+                pass
             raise
 
     def commit_file(self, artifact_id: str, *, durable: bool = True) -> ArtifactSnapshot:
@@ -279,15 +284,23 @@ class ArtifactStore:
         staging = self._resolve(snapshot.staging_path)
         final = self._resolve(snapshot.relative_path)
         final.parent.mkdir(parents=True, exist_ok=True)
+        self._verify(final.parent)
         if final.exists():
+            self._verify(final)
             if self._hash_file(final) != snapshot.content_hash:
                 raise ArtifactIntegrityError("content-addressed destination has wrong hash")
-            staging.unlink(missing_ok=True)
+            self._safe_unlink(staging)
         else:
+            try:
+                self._verify(staging)
+            except FileNotFoundError as exc:
+                raise ArtifactIntegrityError("staging file is missing") from exc
             if not staging.is_file():
                 raise ArtifactIntegrityError("staging file is missing")
             os.replace(staging, final)
+            self._verify(final)
         if durable:
+            self._verify(final.parent)
             self._fsync_directory(final.parent)
         with session_scope(self._sessions) as session:
             record = self._require(session, artifact_id)
@@ -660,7 +673,7 @@ class ArtifactStore:
                         operation
                     ):
                         continue
-                self._resolve(record.staging_path).unlink(missing_ok=True)
+                self._safe_unlink(self._resolve(record.staging_path))
                 record.status = ArtifactStatus.DELETED
                 record.retention_since = datetime.now(UTC)
                 cleaned.append(record.id)
@@ -692,16 +705,18 @@ class ArtifactStore:
             source = self._resolve(record.original_path)
             destination = self._resolve(record.quarantine_path)
             if destination.exists():
+                self._verify(destination)
                 if self._hash_file(destination) != record.content_hash:
                     raise ArtifactIntegrityError(
                         f"quarantined orphan hash mismatch: {record.quarantine_path}"
                     )
                 if source.exists():
+                    self._verify(source)
                     if self._hash_file(source) != record.content_hash:
                         raise ArtifactIntegrityError(
                             f"orphan source conflicts with quarantine: {record.original_path}"
                         )
-                    source.unlink()
+                    self._safe_unlink(source)
                 continue
             if not source.exists():
                 raise ArtifactIntegrityError(
@@ -712,14 +727,18 @@ class ArtifactStore:
                     f"orphan content changed before quarantine: {record.original_path}"
                 )
             destination.parent.mkdir(parents=True, exist_ok=True)
+            self._verify(destination.parent)
+            self._verify(source)
             os.replace(source, destination)
+            self._verify(destination)
             moved.append(record.original_path)
         return moved
 
     def _quarantine_orphans(self) -> list[str]:
         found: list[str] = []
-        artifact_root = self._workspace / "artifacts"
+        artifact_root = self._resolve("artifacts", must_exist=True)
         for path in sorted(item for item in artifact_root.rglob("*") if item.is_file()):
+            path = self._verify(path)
             relative = path.relative_to(self._workspace).as_posix()
             digest = self._hash_file(path)
             orphan_id = str(uuid4())
@@ -763,7 +782,11 @@ class ArtifactStore:
                     )
                     continue
                 if path.exists():
+                    self._verify(path)
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    self._verify(destination.parent)
                     os.replace(path, destination)
+                    self._verify(destination)
             found.append(relative)
         return found
 
@@ -818,6 +841,10 @@ class ArtifactStore:
         if not record.relative_path or not record.content_hash:
             raise ArtifactIntegrityError("artifact file identity is incomplete")
         path = self._resolve(record.relative_path)
+        try:
+            self._verify(path)
+        except FileNotFoundError as exc:
+            raise ArtifactIntegrityError("artifact file is missing") from exc
         if not path.is_file():
             raise ArtifactIntegrityError("artifact file is missing")
         if self._hash_file(path) != record.content_hash:
@@ -827,6 +854,10 @@ class ArtifactStore:
         if not snapshot.relative_path or not snapshot.content_hash:
             raise ArtifactIntegrityError("artifact file identity is incomplete")
         path = self._resolve(snapshot.relative_path)
+        try:
+            self._verify(path)
+        except FileNotFoundError as exc:
+            raise ArtifactIntegrityError("artifact file is missing or corrupt") from exc
         if not path.is_file() or self._hash_file(path) != snapshot.content_hash:
             raise ArtifactIntegrityError("artifact file is missing or corrupt")
 
@@ -876,18 +907,23 @@ class ArtifactStore:
                     f".trash/{digest}{representative.extension}"
                 )
                 if destination.exists():
+                    self._verify(destination)
                     if self._hash_file(destination) != representative.content_hash:
                         raise ArtifactIntegrityError(
                             f"trash destination hash mismatch: {destination.name}"
                         )
-                    source.unlink(missing_ok=True)
+                    self._safe_unlink(source)
                     continue
                 if source.exists():
+                    self._verify(source)
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    self._verify(destination.parent)
                     try:
                         os.replace(source, destination)
                     except FileNotFoundError:
                         if not destination.exists():
                             raise
+                    self._verify(destination)
                     if self._hash_file(destination) != representative.content_hash:
                         raise ArtifactIntegrityError(
                             f"trash destination hash mismatch: {destination.name}"
@@ -969,16 +1005,27 @@ class ArtifactStore:
             for interrupt in interrupts
         )
 
-    def _resolve(self, relative_path: str) -> Path:
-        if not relative_path or Path(relative_path).is_absolute():
-            raise ArtifactIntegrityError("Artifact path must be workspace-relative")
-        resolved = (self._workspace / relative_path).resolve()
-        if not resolved.is_relative_to(self._workspace):
-            raise ArtifactIntegrityError("Artifact path escapes workspace")
-        return resolved
+    def _resolve(self, relative_path: str, *, must_exist: bool = False) -> Path:
+        try:
+            return self._paths.resolve(relative_path, must_exist=must_exist)
+        except UnsafeWorkspacePath as exc:
+            raise ArtifactIntegrityError(str(exc)) from exc
 
-    @staticmethod
-    def _hash_file(path: Path) -> str:
+    def _verify(self, path: Path, *, must_exist: bool = True) -> Path:
+        try:
+            return self._paths.verify(path, must_exist=must_exist)
+        except UnsafeWorkspacePath as exc:
+            raise ArtifactIntegrityError(str(exc)) from exc
+
+    def _safe_unlink(self, path: Path) -> None:
+        try:
+            verified = self._verify(path)
+        except FileNotFoundError:
+            return
+        verified.unlink(missing_ok=True)
+
+    def _hash_file(self, path: Path) -> str:
+        path = self._verify(path)
         digest = hashlib.sha256()
         with path.open("rb") as source:
             for chunk in iter(lambda: source.read(1024 * 1024), b""):

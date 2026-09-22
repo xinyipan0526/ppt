@@ -27,6 +27,7 @@ from ppt_agent.storage.database import (
     session_scope,
 )
 from ppt_agent.storage.models import Base, ProjectRecord
+from ppt_agent.storage.workspace import UnsafeWorkspacePath, WorkspacePaths
 
 
 @pytest.fixture
@@ -199,6 +200,61 @@ def test_file_validator_failure_leaves_artifact_uncommitted(tmp_path: Path) -> N
         engine.dispose()
 
     assert restored.status is ArtifactStatus.STAGING
+    assert restored.content_hash is None
+
+
+@pytest.mark.parametrize(
+    "unsafe_path",
+    ("../outside.part", r"..\outside.part", r"C:\outside.part"),
+)
+def test_artifact_store_rejects_persisted_escaping_staging_path(
+    tmp_path: Path,
+    unsafe_path: str,
+) -> None:
+    store, engine, project_id = create_store(tmp_path)
+    artifact = store.create_staging(request(project_id, "page:unsafe-path"))
+    try:
+        with engine.begin() as connection:
+            connection.execute(
+                text("UPDATE artifacts SET staging_path = :path WHERE id = :id"),
+                {"path": unsafe_path, "id": artifact.id},
+            )
+
+        with pytest.raises(ArtifactIntegrityError, match="[Ww]orkspace|relative"):
+            store.write_staging(artifact.id, [b"must-not-escape"])
+    finally:
+        engine.dispose()
+
+    assert not (tmp_path / "outside.part").exists()
+
+
+def test_artifact_store_rechecks_containment_after_staging_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, engine, project_id = create_store(tmp_path)
+    artifact = store.create_staging(request(project_id, "page:post-write-check"))
+    original_verify = WorkspacePaths.verify
+
+    def reject_written_staging(
+        paths: WorkspacePaths,
+        path: Path,
+        *,
+        must_exist: bool = True,
+    ) -> Path:
+        resolved = original_verify(paths, path, must_exist=must_exist)
+        if resolved.name == f"{artifact.id}.part" and resolved.exists():
+            raise UnsafeWorkspacePath("staging path escapes Workspace after write")
+        return resolved
+
+    monkeypatch.setattr(WorkspacePaths, "verify", reject_written_staging)
+    try:
+        with pytest.raises(ArtifactIntegrityError, match="after write"):
+            store.write_staging(artifact.id, [b"payload"])
+        restored = store.get(artifact.id)
+    finally:
+        engine.dispose()
+
     assert restored.content_hash is None
 
 

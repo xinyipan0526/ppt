@@ -36,6 +36,25 @@ def test_sqlite_engine_applies_reliability_pragmas() -> None:
     assert synchronous == 2
 
 
+def test_database_config_rejects_negative_wal_autocheckpoint() -> None:
+    with pytest.raises(ValueError, match="wal_autocheckpoint"):
+        DatabaseConfig(path=new_database_path(), wal_autocheckpoint=-1)
+
+
+def test_sqlite_engine_applies_wal_autocheckpoint() -> None:
+    engine = create_sqlite_engine(
+        DatabaseConfig(path=new_database_path(), wal_autocheckpoint=321)
+    )
+
+    try:
+        with engine.connect() as connection:
+            actual = connection.execute(text("PRAGMA wal_autocheckpoint")).scalar_one()
+    finally:
+        engine.dispose()
+
+    assert actual == 321
+
+
 def test_session_scope_commits_successful_transaction() -> None:
     engine = create_sqlite_engine(DatabaseConfig(path=new_database_path()))
     sessions = create_session_factory(engine)
@@ -72,4 +91,3 @@ def test_session_scope_rolls_back_failed_transaction() -> None:
         engine.dispose()
 
     assert count == 0
-

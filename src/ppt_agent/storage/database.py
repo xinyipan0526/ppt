@@ -23,10 +23,13 @@ class DatabaseConfig:
     journal_mode: JournalMode = "WAL"
     synchronous: SynchronousMode = "FULL"
     busy_timeout_ms: int = 5_000
+    wal_autocheckpoint: int = 1_000
 
     def __post_init__(self) -> None:
         if self.busy_timeout_ms < 0:
             raise ValueError("busy_timeout_ms must be non-negative")
+        if self.wal_autocheckpoint < 0:
+            raise ValueError("wal_autocheckpoint must be non-negative")
 
 
 def create_sqlite_engine(config: DatabaseConfig) -> Engine:
@@ -46,6 +49,7 @@ def create_sqlite_engine(config: DatabaseConfig) -> Engine:
             cursor.execute("PRAGMA foreign_keys=ON")
             cursor.execute(f"PRAGMA busy_timeout={config.busy_timeout_ms}")
             cursor.execute(f"PRAGMA journal_mode={config.journal_mode}")
+            cursor.execute(f"PRAGMA wal_autocheckpoint={config.wal_autocheckpoint}")
             cursor.execute(f"PRAGMA synchronous={config.synchronous}")
         finally:
             cursor.close()
@@ -77,4 +81,3 @@ def session_scope(sessions: SessionFactory) -> Iterator[Session]:
         raise
     finally:
         session.close()
-
