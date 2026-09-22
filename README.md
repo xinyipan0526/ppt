@@ -590,6 +590,8 @@ Artifact 使用内容哈希标识，数据库只保存元数据、关系和相�
 
 ## 16. 建议代码结构
 
+Python 后端采用标准 src layout，实际可安装包位于 `src/ppt_agent/`；这是 `pyproject.toml` 中明确配置的包路径，不表示源码被多嵌套了一层。仓库级开发约束、当前实现进度和上下文恢复说明见 [AGENTS.md](AGENTS.md)。`AGENTS.md` 服务于编码协作，产品运行时 Agent 则由 `workflows/`、`agents/`、`tools/`、`skills/` 和 `runtime/` 等模块共同实现。
+
 ```text
 ppt-agent/
 ├── apps/
