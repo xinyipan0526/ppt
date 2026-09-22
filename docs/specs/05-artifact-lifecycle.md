@@ -39,13 +39,13 @@ staging
 
 ## 文件提交协议
 
-1. 在 SQLite 中创建 `staging` Artifact 记录和临时相对路径。
+1. 在 SQLite 中创建 `staging` Artifact 记录、临时相对路径以及待提交的元数据/依赖清单。待提交清单仅用于恢复，不能被下游引用。
 2. 在最终目录所在的同一文件系统创建 staging 文件。
 3. 流式写入并计算哈希。
 4. flush；对要求耐久性的文件执行 `fsync`。
-5. 校验格式、尺寸、解码能力和期望哈希。
-6. 原子重命名到内容寻址的最终路径。
-7. 将 Artifact 状态更新为 `file_committed`。
+5. 校验格式、尺寸、解码能力和期望哈希，并在 SQLite 中持久化内容哈希、大小和最终路径意图。
+6. 原子重命名到内容寻址的最终路径；相同内容和扩展名允许多个 Artifact 版本共享同一只读文件。
+7. 将 Artifact 状态更新为 `file_committed`。如果在重命名后、状态更新前崩溃，对账依据已持久化的最终路径意图确认并推进状态。
 8. 在 SQLite 事务中写入完整元数据、依赖边和 `metadata_committed` 状态。
 9. 完成最终一致性检查后转为 `available`。
 
@@ -56,7 +56,7 @@ staging
 启动时或维护任务中执行：
 
 - 清理超过保留期且没有活跃 Operation 的 staging 文件。
-- 为 `file_committed` 且文件存在的记录补写或恢复元数据事务。
+- 为已持久化文件路径意图且最终文件存在的 `staging`，以及 `file_committed` 记录，补写或恢复元数据事务。
 - 将元数据存在但文件缺失的 Artifact 标记为 `invalid`。
 - 将最终目录中没有元数据引用的文件登记为 orphan。
 - 校验 `available` 文件的存在性；按配置抽样复算哈希。
@@ -113,8 +113,11 @@ staging
 ## 引用计数与垃圾回收
 
 - 引用计数来源于数据库依赖边和当前项目引用，不以目录扫描猜测。
+- 显式引用槽以 `(project_id, owner_type, owner_id, role)` 唯一，不能被其他项目的 Artifact 覆盖。
 - 活跃 Run、未解决 Interrupt、非终态或 `outcome_unknown` Provider Attempt 和导出包引用的 Artifact 不得回收。
 - superseded/stale Artifact 进入保留期，默认允许用户撤销。
+- GC 在 `BEGIN IMMEDIATE` 事务中重新检查全部保护条件并先提交 `deleted` 逻辑状态；只有该事务成功后才移动文件。`deleted` 同时是可恢复的物理回收意图，启动对账会幂等补做移动。
+- 共享内容文件仅在没有任何非 `deleted` Artifact 版本引用时移动；回收区路径按内容哈希确定，避免按单版本 ID 推断共享文件状态。
 - orphan 文件先隔离到回收区，再按保留期物理删除。
 - 删除项目需要生成可审计的回收计划。
 

@@ -19,6 +19,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
+from ppt_agent.domain.artifacts import ArtifactEdgeType, ArtifactStatus
 from ppt_agent.domain.state_machine import PageStatus, RunStatus, StepStatus
 from ppt_agent.domain.costs import ReservationStatus
 from ppt_agent.domain.providers import OperationAggregateStatus
@@ -339,3 +340,101 @@ class ProviderRetryAuthorizationRecord(TimestampMixin, Base):
     )
     acknowledgement: Mapped[str] = mapped_column(String(1000), nullable=False)
     consumed_by_attempt_id: Mapped[str | None] = mapped_column(String(100))
+
+
+class ArtifactRecord(TimestampMixin, Base):
+    __tablename__ = "artifacts"
+    __table_args__ = (
+        UniqueConstraint(
+            "project_id", "logical_id", "version", name="uq_artifact_logical_version"
+        ),
+        CheckConstraint(
+            "size_bytes IS NULL OR size_bytes >= 0", name="ck_artifact_size_nonnegative"
+        ),
+        Index("ix_artifact_cache", "project_id", "kind", "spec_fingerprint", "status"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    logical_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    kind: Mapped[str] = mapped_column(String(100), nullable=False)
+    status: Mapped[ArtifactStatus] = mapped_column(
+        enum_type(ArtifactStatus, "artifact_status"), nullable=False
+    )
+    media_type: Mapped[str] = mapped_column(String(100), nullable=False)
+    extension: Mapped[str] = mapped_column(String(20), nullable=False)
+    staging_path: Mapped[str] = mapped_column(String(500), nullable=False, unique=True)
+    relative_path: Mapped[str | None] = mapped_column(String(500))
+    content_hash: Mapped[str | None] = mapped_column(String(80), index=True)
+    size_bytes: Mapped[int | None] = mapped_column(Integer)
+    spec_fingerprint: Mapped[str] = mapped_column(String(255), nullable=False)
+    artifact_metadata: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    pending_edges: Mapped[list[dict[str, str]]] = mapped_column(JSON, nullable=False)
+    operation_id: Mapped[str | None] = mapped_column(
+        ForeignKey("provider_operations.id", ondelete="SET NULL"), index=True
+    )
+    retention_since: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    invalid_reason: Mapped[str | None] = mapped_column(String(255))
+
+
+class ArtifactEdgeRecord(TimestampMixin, Base):
+    __tablename__ = "artifact_edges"
+    __table_args__ = (
+        UniqueConstraint(
+            "source_artifact_id",
+            "target_artifact_id",
+            "edge_type",
+            name="uq_artifact_edge",
+        ),
+        CheckConstraint(
+            "source_artifact_id <> target_artifact_id", name="ck_artifact_edge_not_self"
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    source_artifact_id: Mapped[str] = mapped_column(
+        ForeignKey("artifacts.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    target_artifact_id: Mapped[str] = mapped_column(
+        ForeignKey("artifacts.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    edge_type: Mapped[ArtifactEdgeType] = mapped_column(
+        enum_type(ArtifactEdgeType, "artifact_edge_type"), nullable=False
+    )
+
+
+class ArtifactReferenceRecord(TimestampMixin, Base):
+    __tablename__ = "artifact_references"
+    __table_args__ = (
+        UniqueConstraint(
+            "project_id",
+            "owner_type",
+            "owner_id",
+            "role",
+            name="uq_artifact_reference_slot",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    artifact_id: Mapped[str] = mapped_column(
+        ForeignKey("artifacts.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    owner_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    owner_id: Mapped[str] = mapped_column(String(100), nullable=False)
+    role: Mapped[str] = mapped_column(String(50), nullable=False)
+
+
+class ArtifactOrphanRecord(TimestampMixin, Base):
+    __tablename__ = "artifact_orphans"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    original_path: Mapped[str] = mapped_column(String(500), nullable=False, index=True)
+    quarantine_path: Mapped[str] = mapped_column(String(500), nullable=False, unique=True)
+    size_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
+    content_hash: Mapped[str] = mapped_column(String(80), nullable=False)

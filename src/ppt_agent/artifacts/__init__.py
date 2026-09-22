@@ -1,0 +1,2 @@
+"""Durable local Artifact storage."""
+
