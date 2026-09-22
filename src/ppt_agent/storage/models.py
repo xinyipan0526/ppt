@@ -20,6 +20,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from ppt_agent.domain.artifacts import ArtifactEdgeType, ArtifactStatus
+from ppt_agent.domain.events import EventDurability
 from ppt_agent.domain.state_machine import PageStatus, RunStatus, StepStatus
 from ppt_agent.domain.costs import ReservationStatus
 from ppt_agent.domain.providers import OperationAggregateStatus
@@ -83,6 +84,9 @@ class WorkflowRunRecord(TimestampMixin, Base):
     budget_minor_units: Mapped[int | None] = mapped_column(Integer)
     result_refs: Mapped[list[str] | None] = mapped_column(JSON)
     error: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    next_event_seq: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=1, server_default="1"
+    )
 
 
 class WorkflowStepRecord(TimestampMixin, Base):
@@ -157,7 +161,7 @@ class WorkflowEventRecord(Base):
     __tablename__ = "workflow_events"
     __table_args__ = (
         UniqueConstraint("run_id", "run_seq", name="uq_event_run_sequence"),
-        Index("ix_event_run_created", "run_id", "created_at"),
+        Index("ix_event_run_created", "run_id", "recorded_at"),
     )
 
     event_id: Mapped[str] = mapped_column(String(36), primary_key=True)
@@ -166,12 +170,28 @@ class WorkflowEventRecord(Base):
     )
     run_seq: Mapped[int] = mapped_column(Integer, nullable=False)
     event_type: Mapped[str] = mapped_column(String(150), nullable=False)
-    payload: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(
+    schema_version: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=1, server_default="1"
+    )
+    occurred_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    recorded_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
         server_default=func.current_timestamp(),
     )
+    step_id: Mapped[str | None] = mapped_column(String(100), index=True)
+    page_id: Mapped[str | None] = mapped_column(String(100), index=True)
+    operation_id: Mapped[str | None] = mapped_column(String(100), index=True)
+    trace_id: Mapped[str | None] = mapped_column(String(100), index=True)
+    durability: Mapped[EventDurability] = mapped_column(
+        enum_type(EventDurability, "event_durability"),
+        nullable=False,
+        default=EventDurability.CORE,
+        server_default=EventDurability.CORE.value,
+    )
+    payload: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
 
 
 class BudgetAccountRecord(TimestampMixin, Base):

@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
 
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ppt_agent.domain.state_machine import (
@@ -16,6 +16,7 @@ from ppt_agent.domain.state_machine import (
     transition_run,
     transition_step,
 )
+from ppt_agent.events.persistence import append_event_record
 from ppt_agent.storage.database import SessionFactory, session_scope
 from ppt_agent.storage.models import (
     ProjectRecord,
@@ -330,20 +331,12 @@ class WorkflowRepository:
         event_type: str,
         payload: dict[str, Any],
     ) -> WorkflowEventRecord:
-        next_sequence = session.scalar(
-            select(func.coalesce(func.max(WorkflowEventRecord.run_seq), 0) + 1).where(
-                WorkflowEventRecord.run_id == run_id
-            )
-        )
-        record = WorkflowEventRecord(
-            event_id=str(uuid4()),
+        return append_event_record(
+            session,
             run_id=run_id,
-            run_seq=int(next_sequence or 1),
             event_type=event_type,
             payload=payload,
         )
-        session.add(record)
-        return record
 
     @staticmethod
     def _run_snapshot(record: WorkflowRunRecord) -> RunSnapshot:

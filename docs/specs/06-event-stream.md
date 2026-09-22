@@ -20,6 +20,8 @@
 
 数据库唯一约束为 `(run_id, run_seq)`。`run_seq` 在写事务中分配，不能由多个协程在内存中自行递增。
 
+一期在 `workflow_runs.next_event_seq` 上使用单条原子 `UPDATE ... RETURNING` 分配序号。事件记录与该计数器更新处于同一事务；事务回滚时二者一起回滚，因此并发写入不会读取相同的 `MAX(run_seq)`，也不会因失败提交制造序号空洞。
+
 ## 事务要求
 
 影响 Workflow 状态的事件必须与对应状态变化在同一 SQLite 事务中提交。例如创建 Interrupt 时，同时提交 Interrupt、Run 状态和 `workflow.interrupted` 事件。
@@ -54,16 +56,19 @@ data: <JSON payload>
 ## 游标过期
 
 - `workflow_events` 具有配置化保留期。
+- 保留期按服务端 `recorded_at` 计算，不采用调用方可回填的 `occurred_at`。
 - 影响审计、成本和状态恢复的核心事件不能仅因 SSE 保留期被删除；可以归档到压缩审计记录。
 - 如果 `Last-Event-ID` 早于最早可回放事件，服务端返回 `cursor_expired` 事件并关闭连接。
 - 前端收到后重新拉取全量快照，不猜测缺失状态。
 
 ## 慢消费者
 
-- SSE 使用有界内存缓冲。
+- SSE 从 SQLite 事件日志按配置化批量上限拉取，每个连接只在内存中持有当前批次；SQLite 而不是进程内队列承担积压。
 - 慢客户端不会阻塞 Workflow 或数据库提交。
-- 缓冲溢出时关闭该连接，客户端通过 Last-Event-ID 重连。
+- 客户端落后到保留窗口之外时返回 `cursor_expired` 并关闭连接；客户端重新获取快照。若后续增加内存通知队列，队列只能作为唤醒优化，溢出时必须关闭连接并通过 Last-Event-ID 重连，不能成为事件事实源。
 - 大型 Prompt、Response 和 Artifact 不直接放入事件，只发送摘要和资源引用。
+
+一期每个事件 Payload 的序列化大小有硬上限，并递归拒绝 `prompt`、`response`、`api_key`、`file_content` 等敏感字段。需要调试原文时，只能保存为受保护 Artifact，并在事件中记录资源 ID。
 
 ## 事件类型示例
 
@@ -99,4 +104,3 @@ data: <JSON payload>
 - 游标过期触发全量刷新。
 - 慢消费者不会阻塞 Workflow。
 - Run 状态和语义事件不会出现一方提交、一方缺失。
-
