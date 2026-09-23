@@ -11,6 +11,28 @@ from ppt_agent.storage.database import (
     create_sqlite_engine,
 )
 from ppt_agent.storage.models import Base, InterruptStatus
+from ppt_agent.tools.clarification import ClarificationValidationError
+
+
+def clarification_form() -> dict[str, object]:
+    return {
+        "schema_name": "clarification_form",
+        "schema_version": 1,
+        "kind": "clarification",
+        "reason": "Need page count",
+        "fields": [
+            {
+                "name": "page_count",
+                "type": "number",
+                "question": "How many pages?",
+                "reason": "Planning requires a size.",
+                "options": [],
+                "recommended_value": 8,
+                "required": True,
+            }
+        ],
+        "context": {},
+    }
 
 
 def create_running_step() -> tuple[WorkflowRepository, object, str, str]:
@@ -35,7 +57,7 @@ def test_create_interrupt_moves_run_and_step_to_waiting_in_one_transaction() -> 
         interrupt = repository.create_interrupt(
             run_id=run_id,
             step_id=step_id,
-            form_schema={"fields": [{"name": "page_count", "type": "number"}]},
+            form_schema=clarification_form(),
         )
         run = repository.get_run(run_id)
         step = repository.get_step(step_id)
@@ -53,7 +75,7 @@ def test_resume_interrupt_requeues_run_and_step_with_new_generation() -> None:
         interrupt = repository.create_interrupt(
             run_id=run_id,
             step_id=step_id,
-            form_schema={"fields": [{"name": "page_count", "type": "number"}]},
+            form_schema=clarification_form(),
         )
 
         resumed = repository.resume_interrupt(
@@ -81,7 +103,7 @@ def test_repeating_same_resume_is_idempotent_but_changed_payload_conflicts() -> 
         interrupt = repository.create_interrupt(
             run_id=run_id,
             step_id=step_id,
-            form_schema={"fields": [{"name": "page_count", "type": "number"}]},
+            form_schema=clarification_form(),
         )
         first = repository.resume_interrupt(
             interrupt.id,
@@ -115,7 +137,7 @@ def test_resume_with_wrong_version_leaves_interrupt_pending() -> None:
         interrupt = repository.create_interrupt(
             run_id=run_id,
             step_id=step_id,
-            form_schema={"fields": [{"name": "page_count", "type": "number"}]},
+            form_schema=clarification_form(),
         )
 
         with pytest.raises(InterruptConflict, match="version mismatch"):
@@ -131,3 +153,33 @@ def test_resume_with_wrong_version_leaves_interrupt_pending() -> None:
     assert unchanged.status is InterruptStatus.PENDING
     assert unchanged.resume_payload is None
 
+
+def test_invalid_resume_payload_is_rejected_without_mutating_state_or_events() -> None:
+    repository, engine, run_id, step_id = create_running_step()
+    try:
+        interrupt = repository.create_interrupt(
+            run_id=run_id,
+            step_id=step_id,
+            form_schema=clarification_form(),
+        )
+        before_events = len(repository.list_events(run_id))
+
+        with pytest.raises(ClarificationValidationError, match="unknown answer"):
+            repository.resume_interrupt(
+                interrupt.id,
+                expected_version=1,
+                payload={"page_count": 8, "api_key": "must-not-be-accepted"},
+            )
+
+        unchanged_interrupt = repository.get_interrupt(interrupt.id)
+        unchanged_run = repository.get_run(run_id)
+        unchanged_step = repository.get_step(step_id)
+        after_events = len(repository.list_events(run_id))
+    finally:
+        engine.dispose()
+
+    assert unchanged_interrupt.status is InterruptStatus.PENDING
+    assert unchanged_run.status is RunStatus.WAITING_FOR_USER
+    assert unchanged_step.status is StepStatus.WAITING_FOR_USER
+    assert unchanged_step.generation == 1
+    assert after_events == before_events

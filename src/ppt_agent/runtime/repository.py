@@ -247,13 +247,17 @@ class WorkflowRepository:
             if interrupt.step_id is None:
                 raise InterruptConflict("interrupt has no associated step")
 
+            from ppt_agent.tools.clarification import validate_form_response
+
+            validated_payload = validate_form_response(interrupt.form_schema, payload)
+
             run = self._require_run(session, interrupt.run_id)
             step = self._require_step(session, interrupt.step_id)
             run.status = transition_run(run.status, RunEvent.INTERRUPT_RESUMED)
             step.status = transition_step(step.status, StepEvent.INTERRUPT_RESUMED)
             step.generation += 1
             interrupt.status = InterruptStatus.RESOLVED
-            interrupt.resume_payload = payload
+            interrupt.resume_payload = validated_payload
             interrupt.resolved_at = datetime.now(UTC)
             self._append_event(
                 session,
