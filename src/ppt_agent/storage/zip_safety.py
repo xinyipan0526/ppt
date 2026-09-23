@@ -49,9 +49,10 @@ def validate_zip_members(
 
         path = PurePosixPath(*components)
         destination = path.as_posix()
-        if destination in destinations:
+        destination_key = destination.casefold()
+        if destination_key in destinations:
             raise UnsafeZipEntry(f"ZIP contains duplicate destination: {destination!r}")
-        destinations.add(destination)
+        destinations.add(destination_key)
         validated.append(
             SafeZipMember(info=info, path=path, is_directory=is_directory)
         )

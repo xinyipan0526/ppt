@@ -82,6 +82,14 @@ def test_initial_migration_creates_workflow_runtime_tables() -> None:
         "trace_id",
         "durability",
     } <= event_columns
+    run_columns = {column["name"] for column in inspector.get_columns("workflow_runs")}
+    step_columns = {column["name"] for column in inspector.get_columns("workflow_steps")}
+    operation_columns = {
+        column["name"] for column in inspector.get_columns("provider_operations")
+    }
+    assert {"retry_at", "recovery_metadata"} <= run_columns
+    assert {"retry_at", "recovery_metadata"} <= step_columns
+    assert {"run_id", "step_id", "page_id"} <= operation_columns
 
 
 def test_event_sequence_is_unique_within_a_run() -> None:

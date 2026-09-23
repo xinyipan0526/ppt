@@ -1,3 +1,4 @@
+from dataclasses import replace
 from pathlib import Path
 from uuid import uuid4
 
@@ -9,6 +10,7 @@ from ppt_agent.ledger.costs import BudgetExceeded, CostLedger, ReservationStatus
 from ppt_agent.operations.provider import (
     OperationAggregateStatus,
     OperationBusy,
+    OperationConflict,
     PrepareAttempt,
     ProviderOperationService,
     RetryRiskConfirmationRequired,
@@ -79,6 +81,17 @@ def test_transaction_a_creates_operation_attempt_and_reservation_atomically() ->
     assert reservation.status is ReservationStatus.ACTIVE
     assert reservation.operation_id == operation.id
     assert operation.aggregate_status is OperationAggregateStatus.IN_PROGRESS
+
+
+def test_provider_child_ownership_requires_a_run() -> None:
+    service, _, engine, account_id = create_services()
+    request = attempt_request(account_id)
+    request = replace(request, step_id=str(uuid4()))
+    try:
+        with pytest.raises(OperationConflict, match="require run_id"):
+            service.prepare_attempt(request)
+    finally:
+        engine.dispose()
 
 
 def test_budget_failure_rolls_back_operation_attempt_and_reservation() -> None:

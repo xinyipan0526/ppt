@@ -49,6 +49,8 @@ class RunView:
     workflow_name: str
     workflow_version: int
     status: str
+    retry_at: datetime | None
+    recovery_metadata: dict[str, Any] | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -148,6 +150,8 @@ class WorkflowEventStore:
                     workflow_name=run.workflow_name,
                     workflow_version=run.workflow_version,
                     status=run.status.value,
+                    retry_at=run.retry_at,
+                    recovery_metadata=run.recovery_metadata,
                 ),
                 steps=tuple(
                     EntityView(
@@ -160,6 +164,8 @@ class WorkflowEventStore:
                             "input_refs": step.input_refs,
                             "output_refs": step.output_refs,
                             "error": step.error,
+                            "retry_at": step.retry_at,
+                            "recovery_metadata": step.recovery_metadata,
                         },
                     )
                     for step in steps
@@ -176,6 +182,7 @@ class WorkflowEventStore:
                             "page_spec_version_id": page.page_spec_version_id,
                             "current_artifact_id": page.current_artifact_id,
                             "error": page.error,
+                            "recovery_metadata": page.recovery_metadata,
                         },
                     )
                     for page in pages

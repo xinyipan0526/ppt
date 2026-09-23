@@ -84,6 +84,8 @@ class WorkflowRunRecord(TimestampMixin, Base):
     budget_minor_units: Mapped[int | None] = mapped_column(Integer)
     result_refs: Mapped[list[str] | None] = mapped_column(JSON)
     error: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    retry_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    recovery_metadata: Mapped[dict[str, Any] | None] = mapped_column(JSON)
     next_event_seq: Mapped[int] = mapped_column(
         Integer, nullable=False, default=1, server_default="1"
     )
@@ -111,6 +113,8 @@ class WorkflowStepRecord(TimestampMixin, Base):
     input_refs: Mapped[list[str] | None] = mapped_column(JSON)
     output_refs: Mapped[list[str] | None] = mapped_column(JSON)
     error: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    retry_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    recovery_metadata: Mapped[dict[str, Any] | None] = mapped_column(JSON)
 
 
 class PageRecord(TimestampMixin, Base):
@@ -133,6 +137,7 @@ class PageRecord(TimestampMixin, Base):
     page_spec_version_id: Mapped[str | None] = mapped_column(String(36))
     current_artifact_id: Mapped[str | None] = mapped_column(String(36))
     error: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    recovery_metadata: Mapped[dict[str, Any] | None] = mapped_column(JSON)
 
 
 class WorkflowInterruptRecord(TimestampMixin, Base):
@@ -301,6 +306,15 @@ class ProviderOperationRecord(TimestampMixin, Base):
     selected_attempt_id: Mapped[str | None] = mapped_column(String(100))
     has_unknown_attempts: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False
+    )
+    run_id: Mapped[str | None] = mapped_column(
+        ForeignKey("workflow_runs.id", ondelete="CASCADE"), index=True
+    )
+    step_id: Mapped[str | None] = mapped_column(
+        ForeignKey("workflow_steps.id", ondelete="SET NULL"), index=True
+    )
+    page_id: Mapped[str | None] = mapped_column(
+        ForeignKey("pages.id", ondelete="SET NULL"), index=True
     )
 
 

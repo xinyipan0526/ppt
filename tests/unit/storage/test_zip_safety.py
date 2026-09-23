@@ -56,6 +56,11 @@ def test_validate_zip_members_rejects_duplicate_normalized_destination() -> None
         validate_zip_members([ZipInfo("folder/file.txt"), ZipInfo(r"folder\file.txt")])
 
 
+def test_validate_zip_members_rejects_windows_case_aliases() -> None:
+    with pytest.raises(UnsafeZipEntry, match="duplicate"):
+        validate_zip_members([ZipInfo("slides/Page.png"), ZipInfo("slides/page.png")])
+
+
 def test_validate_zip_members_rejects_unix_symlink() -> None:
     member = ZipInfo("linked-file")
     member.create_system = 3

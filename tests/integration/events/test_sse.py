@@ -6,6 +6,7 @@ from uuid import uuid4
 from httpx import ASGITransport, AsyncClient
 
 from ppt_agent.api.app import create_app
+from ppt_agent.api.security import LocalHTTPSecurity
 from ppt_agent.events.sse import EventStreamService
 from ppt_agent.events.store import EventDurability, WorkflowEventStore
 from ppt_agent.runtime.repository import WorkflowRepository
@@ -116,9 +117,14 @@ def test_snapshot_and_sse_routes_authorize_run_and_honor_last_event_id() -> None
                     store, poll_interval=0.001, batch_size=8
                 ),
                 authorize_run=authorize,
+                security=LocalHTTPSecurity(token="t" * 32),
             )
             transport = ASGITransport(app=app)
-            async with AsyncClient(transport=transport, base_url="http://test") as client:
+            async with AsyncClient(
+                transport=transport,
+                base_url="http://localhost:8000",
+                headers={"Authorization": f"Bearer {'t' * 32}"},
+            ) as client:
                 snapshot_response = await client.get(f"/api/v1/runs/{run_id}/snapshot")
                 async with client.stream(
                     "GET",
@@ -152,9 +158,14 @@ def test_unknown_run_event_route_returns_404_before_stream_starts() -> None:
             app = create_app(
                 event_stream=EventStreamService(store, poll_interval=0.001),
                 authorize_run=authorize,
+                security=LocalHTTPSecurity(token="t" * 32),
             )
             transport = ASGITransport(app=app)
-            async with AsyncClient(transport=transport, base_url="http://test") as client:
+            async with AsyncClient(
+                transport=transport,
+                base_url="http://localhost:8000",
+                headers={"Authorization": f"Bearer {'t' * 32}"},
+            ) as client:
                 response = await client.get(f"/api/v1/runs/{uuid4()}/events")
             return response.status_code, response.json()
         finally:

@@ -68,15 +68,14 @@ docs/specs/          # 已确认的正式技术协议
 
 ## 4. 开发与提交纪律
 
-用户要求在当前分支开发，不新建 worktree。每次只完成一个完整模块：
+用户要求在当前分支开发，不新建 worktree。后续开发以“基础设施里程碑”为批次，不再机械执行“一个模块、一次 RED/GREEN、一次审查、一次提交”的细粒度节奏：
 
-1. 读取相关规格、现有接口和最近提交。
-2. 先写能够因缺失行为而失败的测试，并确认失败原因正确。
-3. 实现最小完整模块，处理错误、并发、恢复和迁移边界。
-4. 运行模块测试，再运行全量测试。
-5. 进行独立代码审查；Critical 和 Important 问题必须在提交前修复并增加回归测试。
-6. 运行 `compileall` 与 `git diff --check`。
-7. 每个模块只做一次功能提交，不把下一个模块混入同一提交。
+1. 读取批次涉及的正式规格、现有接口和最近提交，先锁定跨模块接口与完成标准。
+2. 持久化、状态机、恢复协议、HTTP 安全和应用组合等强依赖基础设施允许合并开发；优先按可验证的纵向链路补测试，不要求每个小函数单独停顿或提交。
+3. 一个批次内可以集中编写测试、连续实现多个相邻模块并统一调试，但最终必须覆盖错误、并发、恢复、迁移和安全边界。
+4. 在合并批次结束时统一运行相关测试与全量测试，进行一次独立代码审查；Critical 和 Important 问题仍必须修复并增加回归测试。
+5. 最终运行 `compileall` 与 `git diff --check`。提交按可恢复检查点拆分，不强制每个内部模块单独提交，也不把未验证的半成品提交为完成状态。
+6. 不因批次扩大而顺手实现 Renderer、OCR、前端或 Deck 业务 Workflow；它们不属于当前基础设施里程碑。
 
 开发环境已经位于 `.venv`。PowerShell 常用验证命令：
 
@@ -108,45 +107,45 @@ git status --short
 | `17ed984` | Provider Operation/Attempt 与远端恢复协议 |
 | `09196e9` | Artifact 生命周期、提交、依赖、失效、GC 和对账 |
 | `adb5364` | Workflow 事件快照、游标续传和 SSE 投影 |
+| `8588af7` | Workspace 路径/ZIP 安全、单实例锁、存储能力探测与 SQLite/Artifact 接线 |
+| 本提交 | 本地 HTTP 安全、恢复协议、TaskSupervisor、备份恢复、应用组合与维护循环 |
 
-截至 `adb5364`：
+截至当前基础设施里程碑：
 
-- 全量测试为 `121 passed`。
+- 全量测试为 `199 passed, 2 skipped`；两项跳过来自当前 Windows 账户无法创建符号链接，其余安全、恢复、迁移、备份和运行时回归测试均已运行。
 - 事件序号通过 Run 行上的原子 `UPDATE ... RETURNING` 分配。
 - 状态变化与核心事件在同一事务提交。
 - SSE 支持一致快照、`Last-Event-ID`、游标过期和有界批量读取。
 - 事件持久化公共入口强制执行 Payload 大小、敏感字段和 event type 安全策略。
-- ArtifactStore 已实现 `reconcile()`，但尚未接入 FastAPI 启动流程。
-- SSE 路由已经要求注入 `authorize_run`，但本地令牌、Host/Origin 和会话安全尚未实现。
+- Workspace 路径统一执行 lexical 与 canonical containment 校验；ZIP 元数据在解压前拒绝路径穿越、驱动器/UNC 和符号链接条目。
+- Workspace 单实例锁使用跨进程 OS 文件锁；数据目录启动探测验证本地文件系统、原子替换、排他锁、`fsync`、空间和实际 SQLite journal mode。
+- 已知网络文件系统和生产模式下无法分类的文件系统拒绝启动；WAL 失败仅在目录持久化能力已验证时回退到 rollback journal。
+- ArtifactStore 已接入 Workspace 路径边界并在写入、重命名后复核 canonical containment。
+- 本地访问令牌支持 Keyring 与只读 Secret 存储，API 已实现严格 Host、Origin、Bearer 与资源级 `authorize_run` 双重边界。
+- 数据库支持 Alembic 启动迁移、完整性检查、Online Backup、版本化清单以及持锁恢复后的迁移、Artifact 对账和失败回滚。
+- 启动顺序已经固定为 Workspace 探测/锁、迁移/完整性、Artifact 对账、状态恢复、Supervisor 与 readiness；失败和关机按反向所有权清理。
+- 恢复扫描不会自动重放 `recovery_required` 或远端未知结果；只有持久化明确证据后才能将 Run 标记为 retry-safe。
+- TaskSupervisor 已实现 Run 去重、全局/项目/Provider 并发边界、取消专用执行路径和有界关闭；事件保留任务也有独立关闭上限。
 
 ## 6. 下一步
 
-下一个完整模块是 **本地安全与 Workspace 存储能力**，以 `docs/specs/07-local-security-and-storage.md` 为准。建议先明确并测试以下边界，再编码：
+持久化、状态机与协议基础设施里程碑已经完成。下一开发批次应进入 **Provider 能力适配与确定性 Deck Workflow 骨架**：
 
-- Workspace 根路径规范化、路径穿越和符号链接/Windows junction 逃逸防护。
-- 数据目录能力探测：本地文件系统、原子重命名、文件锁、WAL 支持和回退策略。
-- 单实例 Workspace 锁。
-- 首次启动本地访问令牌及安全存储抽象；API 的 Host、Origin 和认证依赖。
-- 上传大小、像素数、页数、压缩比和解析超时的配置模型。
-- 安全 ZIP 路径校验。
+- 先实现 DeepSeek 文本能力与统一 Provider capability/错误映射，复用现有 Operation/Attempt、预算和恢复协议。
+- 建立 Brief → DeckOutline → PageSpec → DesignSystem 的确定性 Workflow 接口，并把意图不明确分支接到现有 Interrupt/Resume。
+- 输入解析器开始接入时必须实际执行 `InputLimits`，隔离 PDF/图片/Markdown 不可信内容；配置模型本身不能替代解析时检查。
+- 随后实现 Seedream 图片能力、确定性文字排版/合成、单页重生成与导出链路。
 
-该规格较大。如果实现时单个模块边界过宽，应按“Workspace/路径安全基础”和“本地 HTTP 认证边界”拆成两个连续提交，但不得留下默认开放的生产 API。
-
-随后需要实现 **应用组合与 TaskSupervisor/启动恢复**：
-
-- 获取 Workspace 排他锁。
-- 执行迁移和完整性检查。
-- 在 readiness 和任务恢复前调用 `ArtifactStore.reconcile()`。
-- 对 Provider Attempt 先进入 reconciling，而不是统一重发 running 任务。
-- 恢复 queued/recovery_required 工作，并处理优雅关闭。
+下一批仍不应提前扩展 React 前端或元素级可编辑 PPTX；先保持 Provider 与 Workflow 通过已完成的持久化协议闭环运行。
 
 ## 7. 已知待办与审查结论
 
 - Artifact 启动对账尚未接线，必须在 TaskSupervisor 启动前完成。
 - Artifact 维护操作需要由 Workspace 维护锁保护；跨 Store 并发文件移动仍应继续强化测试。
 - `artifact_references.project_id` 与 Artifact 项目一致性目前由服务层保证，数据库尚无复合外键。
-- SSE 具体的令牌和 Run 所有权校验由本地安全模块实现；当前只有强制注入的授权回调边界。
-- SSE 保留任务的调度与配置尚未实现；清理按服务端 `recorded_at` 判断。
+- Run 所有权规则仍由应用层注入的 `authorize_run` 实现；本地单用户令牌只提供应用级认证，不能替代资源级校验。
+- Workspace 路径审查裁决：并发换链 TOCTOU 需要已取得同一 OS 用户权限的恶意进程，超出一期威胁模型；静态链接在 I/O 前拒绝，写入/重命名后仍复核。
+- 当前 Windows 测试环境不能创建符号链接；在具备开发者模式或 CI 权限的 Windows 环境中仍需运行 link/junction 用例。
 - Provider、Renderer、OCR、前端和实际 Deck Workflow 均尚未进入实现阶段。
 
 这些待办不能因上下文清理而丢失，也不应在无关模块中顺手实现。
@@ -159,5 +158,4 @@ git status --short
 2. 执行 `git status --short`，不得覆盖未提交的用户改动。
 3. 执行 `git log --oneline -12`，确认进度表与实际 HEAD。
 4. 运行相关模块测试，确认基线可复现。
-5. 继续“一个模块、测试先行、审查、全量验证、一次提交”的节奏。
-
+5. 按“基础设施里程碑合并开发、统一审查与全量验证”的节奏继续，不恢复细粒度逐模块停顿。

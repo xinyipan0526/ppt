@@ -9,11 +9,14 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ppt_agent.domain.state_machine import (
+    PageEvent,
+    PageStatus,
     RunEvent,
     RunStatus,
     StepEvent,
     StepStatus,
     transition_run,
+    transition_page,
     transition_step,
 )
 from ppt_agent.events.persistence import append_event_record
@@ -22,6 +25,7 @@ from ppt_agent.storage.models import (
     ProjectRecord,
     InterruptStatus,
     WorkflowInterruptRecord,
+    PageRecord,
     WorkflowEventRecord,
     WorkflowRunRecord,
     WorkflowStepRecord,
@@ -299,6 +303,71 @@ class WorkflowRepository:
                 .order_by(WorkflowEventRecord.run_seq)
             ).all()
             return [self._event_snapshot(record) for record in records]
+
+    def mark_run_recovery_required(self, run_id: str, *, reason: str) -> RunSnapshot:
+        """Persist an interrupted local execution without making it retry-safe."""
+
+        with session_scope(self._sessions) as session:
+            run = self._require_run(session, run_id)
+            if run.status is RunStatus.RUNNING:
+                run.status = transition_run(run.status, RunEvent.PROCESS_RESTARTED)
+                run.recovery_metadata = {"reason": reason}
+            for step in session.scalars(
+                select(WorkflowStepRecord).where(
+                    WorkflowStepRecord.run_id == run_id,
+                    WorkflowStepRecord.status == StepStatus.RUNNING,
+                )
+            ):
+                step.status = transition_step(step.status, StepEvent.PROCESS_RESTARTED)
+                step.recovery_metadata = {"reason": reason}
+            for page in session.scalars(
+                select(PageRecord).where(
+                    PageRecord.run_id == run_id,
+                    PageRecord.status == PageStatus.RUNNING,
+                )
+            ):
+                page.status = transition_page(page.status, PageEvent.PROCESS_RESTARTED)
+                page.recovery_metadata = {"reason": reason}
+            self._append_event(
+                session,
+                run_id=run_id,
+                event_type="run.recovery_required",
+                payload={"status": run.status.value, "reason": reason},
+            )
+            return self._run_snapshot(run)
+
+    def mark_recovery_retry_safe(self, run_id: str, *, evidence: str) -> RunSnapshot:
+        """Explicitly authorize replay after reconciliation produced evidence."""
+
+        if not evidence.strip():
+            raise ValueError("recovery retry evidence must not be empty")
+        with session_scope(self._sessions) as session:
+            run = self._require_run(session, run_id)
+            for step in session.scalars(
+                select(WorkflowStepRecord).where(
+                    WorkflowStepRecord.run_id == run_id,
+                    WorkflowStepRecord.status == StepStatus.RECOVERY_REQUIRED,
+                )
+            ):
+                step.status = transition_step(step.status, StepEvent.RECOVERY_RETRY_SAFE)
+                step.recovery_metadata = {"retry_safe_evidence": evidence}
+            for page in session.scalars(
+                select(PageRecord).where(
+                    PageRecord.run_id == run_id,
+                    PageRecord.status == PageStatus.RECOVERY_REQUIRED,
+                )
+            ):
+                page.status = transition_page(page.status, PageEvent.RECOVERY_RETRY_SAFE)
+                page.recovery_metadata = {"retry_safe_evidence": evidence}
+            run.status = transition_run(run.status, RunEvent.RECOVERY_RETRY_SAFE)
+            run.recovery_metadata = {"retry_safe_evidence": evidence}
+            self._append_event(
+                session,
+                run_id=run_id,
+                event_type="run.recovery_retry_safe",
+                payload={"status": run.status.value, "evidence": evidence},
+            )
+            return self._run_snapshot(run)
 
     @staticmethod
     def _require_run(session: Session, run_id: str) -> WorkflowRunRecord:

@@ -17,10 +17,13 @@ from ppt_agent.domain.state_machine import (
 from ppt_agent.ledger.costs import CostLedger, UsageInput
 from ppt_agent.storage.database import SessionFactory, session_scope
 from ppt_agent.storage.models import (
+    PageRecord,
     ProviderAttemptRecord,
     ProviderOperationRecord,
     ProviderRetryAuthorizationRecord,
     UsageRecord,
+    WorkflowRunRecord,
+    WorkflowStepRecord,
 )
 
 
@@ -56,6 +59,9 @@ class PrepareAttempt:
     currency: str
     pricing_version: str
     idempotency_key: str | None
+    run_id: str | None = None
+    step_id: str | None = None
+    page_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,6 +74,9 @@ class OperationSnapshot:
     aggregate_status: OperationAggregateStatus
     selected_attempt_id: str | None
     has_unknown_attempts: bool
+    run_id: str | None
+    step_id: str | None
+    page_id: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -107,6 +116,7 @@ class ProviderOperationService:
 
         with session_scope(self._sessions) as session:
             self._ledger.begin_write_transaction(session)
+            self._validate_ownership(session, request)
             operation = session.get(ProviderOperationRecord, request.operation_id)
             if operation is None:
                 operation = ProviderOperationRecord(
@@ -118,6 +128,9 @@ class ProviderOperationService:
                     aggregate_status=OperationAggregateStatus.PENDING,
                     selected_attempt_id=None,
                     has_unknown_attempts=False,
+                    run_id=request.run_id,
+                    step_id=request.step_id,
+                    page_id=request.page_id,
                 )
                 session.add(operation)
                 session.flush()
@@ -350,6 +363,23 @@ class ProviderOperationService:
             ]
 
     @staticmethod
+    def _validate_ownership(session: Session, request: PrepareAttempt) -> None:
+        if (request.step_id is not None or request.page_id is not None) and request.run_id is None:
+            raise OperationConflict("step_id and page_id require run_id ownership")
+        if request.run_id is None:
+            return
+        if session.get(WorkflowRunRecord, request.run_id) is None:
+            raise OperationConflict("provider operation run does not exist")
+        if request.step_id is not None:
+            step = session.get(WorkflowStepRecord, request.step_id)
+            if step is None or step.run_id != request.run_id:
+                raise OperationConflict("provider operation step does not belong to run")
+        if request.page_id is not None:
+            page = session.get(PageRecord, request.page_id)
+            if page is None or page.run_id != request.run_id:
+                raise OperationConflict("provider operation page does not belong to run")
+
+    @staticmethod
     def _validate_operation_identity(
         operation: ProviderOperationRecord, request: PrepareAttempt
     ) -> None:
@@ -358,12 +388,18 @@ class ProviderOperationService:
             request.request_fingerprint,
             request.provider,
             request.model,
+            request.run_id,
+            request.step_id,
+            request.page_id,
         )
         actual = (
             operation.operation_kind,
             operation.request_fingerprint,
             operation.provider,
             operation.model,
+            operation.run_id,
+            operation.step_id,
+            operation.page_id,
         )
         if actual != expected:
             raise OperationConflict(
@@ -435,6 +471,9 @@ class ProviderOperationService:
             aggregate_status=record.aggregate_status,
             selected_attempt_id=record.selected_attempt_id,
             has_unknown_attempts=record.has_unknown_attempts,
+            run_id=record.run_id,
+            step_id=record.step_id,
+            page_id=record.page_id,
         )
 
     @staticmethod
@@ -453,4 +492,3 @@ class ProviderOperationService:
             error_code=record.error_code,
             response_summary=record.response_summary,
         )
-
