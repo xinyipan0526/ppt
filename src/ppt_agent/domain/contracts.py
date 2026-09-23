@@ -134,6 +134,30 @@ class ClarificationRequired(ContractModel):
     questions: tuple[ClarificationQuestion, ...] = Field(min_length=1, max_length=4)
 
 
+class BriefDecision(ContractModel):
+    """Runtime JSON-schema shape for the discriminated brief decision."""
+
+    kind: Literal["ready", "clarification_required"]
+    brief: PresentationBrief | None = None
+    reason: str | None = Field(default=None, max_length=1_000)
+    questions: tuple[ClarificationQuestion, ...] = Field(default=(), max_length=4)
+
+    @model_validator(mode="after")
+    def validate_decision(self) -> "BriefDecision":
+        if self.kind == "ready":
+            if self.brief is None or self.reason is not None or self.questions:
+                raise ValueError("ready decision requires only a brief")
+        elif (
+            self.brief is not None
+            or not self.reason
+            or not 1 <= len(self.questions) <= 4
+        ):
+            raise ValueError(
+                "clarification_required needs a reason and one to four questions"
+            )
+        return self
+
+
 ClarificationDecision: TypeAlias = Annotated[
     BriefReady | ClarificationRequired,
     Field(discriminator="kind"),

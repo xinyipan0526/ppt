@@ -409,6 +409,26 @@ class ArtifactStore:
         with session_scope(self._sessions) as session:
             return self._snapshot(self._require(session, artifact_id))
 
+    def read_bytes(self, artifact_id: str) -> bytes:
+        """Read a committed Artifact after rechecking its workspace boundary."""
+
+        snapshot = self.get(artifact_id)
+        if snapshot.status not in {
+            ArtifactStatus.AVAILABLE,
+            ArtifactStatus.STALE,
+            ArtifactStatus.SUPERSEDED,
+        }:
+            raise ArtifactConflict("artifact is not readable")
+        if not snapshot.relative_path:
+            raise ArtifactIntegrityError("artifact has no committed path")
+        path = self._resolve(snapshot.relative_path)
+        self._verify(path)
+        if not path.is_file():
+            raise ArtifactIntegrityError("artifact file is missing")
+        if snapshot.content_hash and self._hash_file(path) != snapshot.content_hash:
+            raise ArtifactIntegrityError("artifact content hash does not match metadata")
+        return path.read_bytes()
+
     def find_cache_hit(
         self, project_id: str, kind: str, spec_fingerprint: str
     ) -> ArtifactSnapshot | None:
@@ -424,6 +444,26 @@ class ArtifactStore:
                 .order_by(ArtifactRecord.created_at.desc())
             )
             return None if record is None else self._snapshot(record)
+
+    def list_by_operation(self, operation_id: str) -> tuple[ArtifactSnapshot, ...]:
+        """Return durable outputs associated with one provider operation."""
+
+        with session_scope(self._sessions) as session:
+            records = session.scalars(
+                select(ArtifactRecord)
+                .where(
+                    ArtifactRecord.operation_id == operation_id,
+                    ArtifactRecord.status.in_(
+                        {
+                            ArtifactStatus.AVAILABLE,
+                            ArtifactStatus.STALE,
+                            ArtifactStatus.SUPERSEDED,
+                        }
+                    ),
+                )
+                .order_by(ArtifactRecord.logical_id, ArtifactRecord.version.desc())
+            )
+            return tuple(self._snapshot(record) for record in records)
 
     def mark_stale(self, artifact_id: str) -> tuple[str, ...]:
         now = datetime.now(UTC)

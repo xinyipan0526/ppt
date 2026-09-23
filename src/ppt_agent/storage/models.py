@@ -14,6 +14,7 @@ from sqlalchemy import (
     Index,
     Integer,
     String,
+    Text,
     UniqueConstraint,
     func,
 )
@@ -115,6 +116,25 @@ class WorkflowStepRecord(TimestampMixin, Base):
     error: Mapped[dict[str, Any] | None] = mapped_column(JSON)
     retry_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     recovery_metadata: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+
+
+class PlanningInputRecord(TimestampMixin, Base):
+    __tablename__ = "planning_inputs"
+    __table_args__ = (
+        UniqueConstraint("run_id", "generation", name="uq_planning_input_generation"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    run_id: Mapped[str] = mapped_column(
+        ForeignKey("workflow_runs.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    generation: Mapped[int] = mapped_column(Integer, nullable=False)
+    normalized_text: Mapped[str] = mapped_column(Text, nullable=False)
+    source_refs: Mapped[list[str]] = mapped_column(JSON, nullable=False)
+    feedback: Mapped[str | None] = mapped_column(Text)
+    revision_scope: Mapped[str | None] = mapped_column(String(20))
+    page_indexes: Mapped[list[int]] = mapped_column(JSON, nullable=False, default=list)
+    clarification_answers: Mapped[dict[str, Any] | None] = mapped_column(JSON)
 
 
 class PageRecord(TimestampMixin, Base):

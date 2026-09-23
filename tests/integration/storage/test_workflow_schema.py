@@ -60,6 +60,7 @@ def test_initial_migration_creates_workflow_runtime_tables() -> None:
         "artifact_edges",
         "artifact_references",
         "artifact_orphans",
+        "planning_inputs",
     }
     assert set(Base.metadata.tables) == tables - {"alembic_version"}
     assert {tuple(item["column_names"]) for item in reservation_uniques} == {
@@ -90,6 +91,10 @@ def test_initial_migration_creates_workflow_runtime_tables() -> None:
     assert {"retry_at", "recovery_metadata"} <= run_columns
     assert {"retry_at", "recovery_metadata"} <= step_columns
     assert {"run_id", "step_id", "page_id"} <= operation_columns
+    planning_uniques = inspector.get_unique_constraints("planning_inputs")
+    assert {tuple(item["column_names"]) for item in planning_uniques} == {
+        ("run_id", "generation")
+    }
 
 
 def test_event_sequence_is_unique_within_a_run() -> None:

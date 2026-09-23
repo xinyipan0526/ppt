@@ -3,6 +3,7 @@
 from dataclasses import dataclass, replace
 from hashlib import sha256
 import json
+from collections.abc import Callable
 
 from pydantic import ValidationError
 
@@ -62,6 +63,7 @@ class TextOperationRunner:
         output_type: type[ContractModel],
         operation: PrepareAttempt,
         pricing: TextPricing,
+        validate_output: Callable[[ContractModel], None] | None = None,
     ) -> TextOperationResult:
         self._validate_configuration(request, operation, pricing)
         prepared = self._operations.prepare_attempt(
@@ -91,7 +93,9 @@ class TextOperationRunner:
 
         try:
             output = output_type.model_validate(result.value)
-        except ValidationError as exc:
+            if validate_output is not None:
+                validate_output(output)
+        except (ValidationError, ValueError) as exc:
             error = ProviderCallError(
                 code="content_rejected",
                 retryable=False,
@@ -101,7 +105,9 @@ class TextOperationRunner:
                 safe_summary={
                     **result.response_summary,
                     "reason": "local_schema_validation_failed",
-                    "validation_error_count": exc.error_count(),
+                    "validation_error_count": (
+                        exc.error_count() if isinstance(exc, ValidationError) else 1
+                    ),
                 },
             )
             self._operations.record_charged_failure(
@@ -192,4 +198,3 @@ class TextOperationRunner:
                 "reasoning_tokens": usage.reasoning_tokens,
             },
         )
-
