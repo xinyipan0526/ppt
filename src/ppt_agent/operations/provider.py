@@ -306,6 +306,36 @@ class ProviderOperationService:
             self._recompute_operation(session, attempt.operation_id)
             return self._attempt_snapshot(attempt)
 
+    def record_charged_failure(
+        self,
+        attempt_id: str,
+        usage: UsageInput,
+        error_code: str,
+        response_summary: dict[str, Any] | None = None,
+    ) -> AttemptSnapshot:
+        """Settle known billed usage while keeping the operation unsuccessful."""
+
+        with session_scope(self._sessions) as session:
+            self._ledger.begin_write_transaction(session)
+            attempt = self._require_attempt(session, attempt_id)
+            if usage.attempt_id != attempt.id:
+                raise OperationConflict("usage attempt_id does not match attempt")
+            attempt.status = transition_attempt(
+                attempt.status, AttemptEvent.KNOWN_FAILURE
+            )
+            self._ledger.settle_in_transaction(session, attempt.reservation_id, usage)
+            usage_record = session.scalar(
+                select(UsageRecord).where(UsageRecord.usage_key == usage.usage_key)
+            )
+            if usage_record is None:
+                raise RuntimeError("usage record was not persisted")
+            attempt.usage_record_id = usage_record.id
+            attempt.error_code = error_code
+            attempt.response_received_at = datetime.now(UTC)
+            attempt.response_summary = response_summary
+            self._recompute_operation(session, attempt.operation_id)
+            return self._attempt_snapshot(attempt)
+
     def authorize_retry_after_unknown(
         self,
         operation_id: str,
