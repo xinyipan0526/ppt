@@ -15,6 +15,7 @@ from ppt_agent.domain.contracts import (
     DeckOutline,
     DesignSystem,
     PageSpec,
+    PageSpecPatch,
     PageSpecs,
     PlanningBundle,
     PresentationBrief,
@@ -132,7 +133,10 @@ class DeckPlanningWorkflow:
                     if not self._review(run_id, step):
                         return
             except ProviderCallError as exc:
-                if exc.code == "unknown_remote_outcome":
+                if (
+                    exc.code == "unknown_remote_outcome"
+                    or (not exc.billing_known and not exc.confirmed_uncharged)
+                ):
                     self.store.repository.mark_run_recovery_required(
                         run_id, reason=exc.code
                     )
@@ -153,6 +157,7 @@ class DeckPlanningWorkflow:
             "normalized_text": current.normalized_text,
             "source_refs": current.source_refs,
         }
+        self._add_revision_context(content, current)
         resumed = self.store.step_resume_payload(step.step_id)
         if resumed:
             current = self.store.record_clarification(run_id, resumed)
@@ -205,6 +210,8 @@ class DeckPlanningWorkflow:
             if len(outline.pages) != brief.page_count:
                 raise ValueError("outline pages must match brief page count")
 
+        content = {"brief": brief.model_dump(mode="json")}
+        self._add_revision_context(content, self.store.current_input(run_id))
         outline = cast(
             DeckOutline,
             await self._call(
@@ -212,7 +219,7 @@ class DeckPlanningWorkflow:
                 step,
                 prompt_identity="outline",
                 output_type=DeckOutline,
-                content={"brief": brief.model_dump(mode="json")},
+                content=content,
                 validate_output=validate,
             ),
         )
@@ -230,6 +237,11 @@ class DeckPlanningWorkflow:
     async def _build_design(self, run_id: str, step: PlanningStep) -> None:
         brief_id = self._one_ref(run_id, "build_brief")
         outline_id = self._one_ref(run_id, "build_outline")
+        content = {
+            "brief": self._read_payload(brief_id),
+            "outline": self._read_payload(outline_id),
+        }
+        self._add_revision_context(content, self.store.current_input(run_id))
         design = cast(
             DesignSystem,
             await self._call(
@@ -237,10 +249,7 @@ class DeckPlanningWorkflow:
                 step,
                 prompt_identity="design-system",
                 output_type=DesignSystem,
-                content={
-                    "brief": self._read_payload(brief_id),
-                    "outline": self._read_payload(outline_id),
-                },
+                content=content,
             ),
         )
         artifact = self._write_artifact(
@@ -266,6 +275,72 @@ class DeckPlanningWorkflow:
             if candidate.brief_page_count != brief.page_count or candidate.outline != outline:
                 raise ValueError("page specs do not match current brief and outline")
 
+        current = self.store.current_input(run_id)
+        targeted = current.revision_scope == "pages" and bool(current.page_indexes)
+        content = {
+            "brief": brief.model_dump(mode="json"),
+            "outline": outline.model_dump(mode="json"),
+            "design_system": self._read_payload(design_id),
+        }
+        self._add_revision_context(content, current)
+        if targeted:
+            existing_refs = self.store.stage_output_refs(run_id, "build_page_specs")
+            content["current_page_specs"] = [
+                self._read_payload(artifact_id) for artifact_id in existing_refs
+            ]
+
+            def validate_patch(value: ContractModel) -> None:
+                patch = cast(PageSpecPatch, value)
+                if tuple(page.page_index for page in patch.pages) != current.page_indexes:
+                    raise ValueError("page patch must contain exactly the selected pages")
+                for page in patch.pages:
+                    if page.objective != outline.pages[page.page_index - 1].objective:
+                        raise ValueError("patched page objective must match outline")
+
+            patch = cast(
+                PageSpecPatch,
+                await self._call(
+                    run_id,
+                    step,
+                    prompt_identity="page-specs",
+                    output_type=PageSpecPatch,
+                    content=content,
+                    validate_output=validate_patch,
+                ),
+            )
+            operation_id = self._operation_id(run_id, step)
+            aggregate_id = self._write_artifact(
+                run_id,
+                "planning/page-specs-patch",
+                "planning.page_specs_patch",
+                "page_spec_patch",
+                patch,
+                (
+                    brief_id,
+                    outline_id,
+                    design_id,
+                    *(
+                        artifact_id
+                        for index, artifact_id in enumerate(existing_refs, start=1)
+                        if index not in current.page_indexes
+                    ),
+                ),
+                operation_id=operation_id,
+            )
+            merged = list(existing_refs)
+            for page in patch.pages:
+                merged[page.page_index - 1] = self._write_artifact(
+                    run_id,
+                    f"planning/pages/{page.page_index}",
+                    "planning.page_spec",
+                    "page_spec",
+                    page,
+                    (aggregate_id,),
+                    operation_id=operation_id,
+                )
+            self.store.complete_page_specs(step.step_id, tuple(merged))
+            return
+
         pages = cast(
             PageSpecs,
             await self._call(
@@ -273,11 +348,7 @@ class DeckPlanningWorkflow:
                 step,
                 prompt_identity="page-specs",
                 output_type=PageSpecs,
-                content={
-                    "brief": brief.model_dump(mode="json"),
-                    "outline": outline.model_dump(mode="json"),
-                    "design_system": self._read_payload(design_id),
-                },
+                content=content,
                 validate_output=validate,
             ),
         )
@@ -303,7 +374,7 @@ class DeckPlanningWorkflow:
             )
             for page in pages.pages
         )
-        self.store.complete_step(step.step_id, artifact_ids)
+        self.store.complete_page_specs(step.step_id, artifact_ids)
 
     def _review(self, run_id: str, step: PlanningStep) -> bool:
         payload = self.store.step_resume_payload(step.step_id)
@@ -341,13 +412,12 @@ class DeckPlanningWorkflow:
                 bundle,
                 refs,
                 edge_type=ArtifactEdgeType.COMPOSED_FROM,
+                metadata={"review_step_id": step.step_id},
             )
-            self.store.complete_step(step.step_id, (bundle_id,))
-            self.store.finish_run(run_id, (bundle_id, *refs))
+            self.store.finish_review(run_id, step.step_id, bundle_id, refs)
             return False
         if action == "cancel":
-            self.store.repository.transition_step(step.step_id, StepEvent.CANCEL_REQUESTED)
-            self.store.repository.transition_run(run_id, RunEvent.CANCEL_REQUESTED)
+            self.store.cancel_review(run_id, step.step_id)
             return False
 
         brief = PresentationBrief.model_validate(
@@ -357,10 +427,12 @@ class DeckPlanningWorkflow:
         if any(index > brief.page_count for index in request.page_indexes):
             raise ValueError("page index outside current brief range")
         roots = self._revision_roots(run_id, request)
-        self.store.complete_step(step.step_id, ())
-        for artifact_id in roots:
-            self.artifacts.mark_stale(artifact_id)
-        self.store.apply_revision(run_id, request)
+        self.store.apply_revision(
+            run_id,
+            request,
+            review_step_id=step.step_id,
+            stale_roots=roots,
+        )
         return True
 
     async def _call(
@@ -419,6 +491,7 @@ class DeckPlanningWorkflow:
         *,
         edge_type: ArtifactEdgeType = ArtifactEdgeType.DERIVED_FROM,
         operation_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
     ) -> str:
         run = self.store.repository.get_run(run_id)
         body = json.dumps(
@@ -438,7 +511,12 @@ class DeckPlanningWorkflow:
                 media_type="application/json",
                 extension=".json",
                 spec_fingerprint=fingerprint,
-                metadata={"schema_name": schema_name, "schema_version": 1, "run_id": run_id},
+                metadata={
+                    "schema_name": schema_name,
+                    "schema_version": 1,
+                    "run_id": run_id,
+                    **(metadata or {}),
+                },
                 edges=tuple(EdgeInput(item, edge_type) for item in dependencies),
                 operation_id=operation_id,
             )
@@ -450,9 +528,26 @@ class DeckPlanningWorkflow:
         return staging.id
 
     def _recover_committed_step(self, run_id: str, step: PlanningStep) -> bool:
-        if step.stage == "review_plan":
-            return False
         operation_id = self._operation_id(run_id, step)
+        if step.stage == "review_plan":
+            run = self.store.repository.get_run(run_id)
+            bundle = next(
+                (
+                    item
+                    for item in self.artifacts.list_versions(
+                        run.project_id, "planning/bundle"
+                    )
+                    if item.kind == "planning.bundle"
+                    and item.status.value == "available"
+                    and item.metadata.get("review_step_id") == step.step_id
+                ),
+                None,
+            )
+            if bundle is None:
+                return False
+            refs = self._all_planning_refs(run_id)
+            self.store.finish_review(run_id, step.step_id, bundle.id, refs)
+            return True
         outputs = self.artifacts.list_by_operation(operation_id)
         if not outputs:
             return False
@@ -466,6 +561,24 @@ class DeckPlanningWorkflow:
             if len(matches) != 1:
                 return False
             self.store.complete_step(step.step_id, (matches[0],))
+            return True
+
+        patch_aggregate = next(
+            (item for item in outputs if item.kind == "planning.page_specs_patch"), None
+        )
+        if patch_aggregate is not None:
+            patch = PageSpecPatch.model_validate(self._read_payload(patch_aggregate.id))
+            page_ids = list(self.store.stage_output_refs(run_id, "build_page_specs"))
+            existing = {
+                item.logical_id: item.id
+                for item in outputs
+                if item.kind == "planning.page_spec"
+            }
+            for page in patch.pages:
+                page_ids[page.page_index - 1] = existing[
+                    f"planning/pages/{page.page_index}"
+                ]
+            self.store.complete_page_specs(step.step_id, tuple(page_ids))
             return True
 
         aggregate = next(
@@ -494,8 +607,17 @@ class DeckPlanningWorkflow:
                     operation_id=operation_id,
                 )
             page_ids.append(artifact_id)
-        self.store.complete_step(step.step_id, tuple(page_ids))
+        self.store.complete_page_specs(step.step_id, tuple(page_ids))
         return True
+
+    @staticmethod
+    def _add_revision_context(content: dict[str, Any], current) -> None:
+        if current.feedback:
+            content["revision"] = {
+                "feedback": current.feedback,
+                "scope": current.revision_scope,
+                "page_indexes": list(current.page_indexes),
+            }
 
     def _read_payload(self, artifact_id: str) -> dict[str, Any]:
         value = json.loads(self.artifacts.read_bytes(artifact_id))

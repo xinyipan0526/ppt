@@ -211,3 +211,54 @@ def test_unknown_outcome_holds_budget_and_blocks_automatic_retry() -> None:
     assert attempt.status is AttemptStatus.OUTCOME_UNKNOWN
     assert reservation.status is ReservationStatus.HELD_UNKNOWN
 
+
+def test_success_payload_is_reused_after_crash_before_artifact_materialization() -> None:
+    engine, _, service, account_id = setup_services()
+    first_provider = FakeProvider(success())
+    unavailable = FakeProvider(
+        ProviderCallError(
+            "unknown_remote_outcome", False, False, False, None, {"phase": "must_not_call"}
+        )
+    )
+    try:
+        first = asyncio.run(
+            TextOperationRunner(service, first_provider).execute(
+                request=request(),
+                output_type=PresentationBrief,
+                operation=operation(account_id),
+                pricing=PRICING,
+            )
+        )
+        recovered = asyncio.run(
+            TextOperationRunner(service, unavailable).execute(
+                request=request(),
+                output_type=PresentationBrief,
+                operation=operation(account_id),
+                pricing=PRICING,
+            )
+        )
+    finally:
+        engine.dispose()
+
+    assert recovered.output == first.output
+    assert recovered.usage == first.usage
+    assert unavailable.calls == 0
+
+
+def test_runner_rejects_reservation_below_conservative_maximum() -> None:
+    engine, _, service, account_id = setup_services()
+    provider = FakeProvider(success())
+    try:
+        with pytest.raises(ValueError, match="reservation"):
+            asyncio.run(
+                TextOperationRunner(service, provider).execute(
+                    request=request(),
+                    output_type=PresentationBrief,
+                    operation=replace(operation(account_id), reservation_amount=1),
+                    pricing=PRICING,
+                )
+            )
+    finally:
+        engine.dispose()
+
+    assert provider.calls == 0

@@ -66,8 +66,27 @@ class TextOperationRunner:
         validate_output: Callable[[ContractModel], None] | None = None,
     ) -> TextOperationResult:
         self._validate_configuration(request, operation, pricing)
+        fingerprint = self._fingerprint(request)
+        stored = self._operations.get_text_result(operation.operation_id)
+        if stored is not None:
+            if (
+                stored.request_fingerprint != fingerprint
+                or stored.schema_name != request.schema_name
+                or stored.schema_version != request.schema_version
+            ):
+                raise ValueError("stored text result identity does not match request")
+            output = output_type.model_validate(stored.output_payload)
+            if validate_output is not None:
+                validate_output(output)
+            usage = TextUsage(**stored.usage)
+            return TextOperationResult(
+                attempt_id=stored.attempt_id,
+                operation_id=stored.operation_id,
+                output=output,
+                usage=usage,
+            )
         prepared = self._operations.prepare_attempt(
-            replace(operation, request_fingerprint=self._fingerprint(request))
+            replace(operation, request_fingerprint=fingerprint)
         )
         self._operations.commit_submission_intent(prepared.id)
         try:
@@ -122,6 +141,15 @@ class TextOperationRunner:
             prepared.id,
             self._usage_input(prepared.id, operation, pricing, result.usage),
             result.response_summary,
+            schema_name=request.schema_name,
+            schema_version=request.schema_version,
+            output_payload=output.model_dump(mode="json"),
+            text_usage={
+                "input_tokens": result.usage.input_tokens,
+                "output_tokens": result.usage.output_tokens,
+                "cached_tokens": result.usage.cached_tokens,
+                "reasoning_tokens": result.usage.reasoning_tokens,
+            },
         )
         return TextOperationResult(
             attempt_id=prepared.id,
@@ -144,6 +172,20 @@ class TextOperationRunner:
             raise ValueError("operation currency must match pricing")
         if operation.pricing_version != pricing.version:
             raise ValueError("operation pricing version must match pricing")
+        worst_input_tokens = len(
+            (request.system_prompt + request.user_content).encode("utf-8")
+        )
+        numerator = (
+            worst_input_tokens * pricing.input_per_million
+            + request.max_output_tokens * pricing.output_per_million
+        )
+        maximum = (
+            numerator * pricing.safety_factor_millis + 999_999_999
+        ) // 1_000_000_000
+        if operation.reservation_amount < maximum:
+            raise ValueError(
+                f"reservation must cover conservative maximum of {maximum} minor units"
+            )
 
     @staticmethod
     def _fingerprint(request: StructuredTextRequest) -> str:

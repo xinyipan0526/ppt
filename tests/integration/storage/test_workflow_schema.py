@@ -56,6 +56,7 @@ def test_initial_migration_creates_workflow_runtime_tables() -> None:
         "provider_operations",
         "provider_attempts",
         "provider_retry_authorizations",
+        "provider_text_results",
         "artifacts",
         "artifact_edges",
         "artifact_references",

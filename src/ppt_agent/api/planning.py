@@ -129,19 +129,19 @@ def planning_router(
             run = await asyncio.to_thread(workflow.store.repository.get_run, run_id)
             planning_input = await asyncio.to_thread(workflow.store.current_input, run_id)
             brief = await asyncio.to_thread(
-                workflow.store.stage_output_refs, run_id, "build_brief"
+                workflow.store.available_stage_output_refs, run_id, "build_brief"
             )
             outline = await asyncio.to_thread(
-                workflow.store.stage_output_refs, run_id, "build_outline"
+                workflow.store.available_stage_output_refs, run_id, "build_outline"
             )
             design = await asyncio.to_thread(
-                workflow.store.stage_output_refs, run_id, "build_design_system"
+                workflow.store.available_stage_output_refs, run_id, "build_design_system"
             )
             pages = await asyncio.to_thread(
-                workflow.store.stage_output_refs, run_id, "build_page_specs"
+                workflow.store.available_stage_output_refs, run_id, "build_page_specs"
             )
             bundle = await asyncio.to_thread(
-                workflow.store.stage_output_refs, run_id, "review_plan"
+                workflow.store.available_stage_output_refs, run_id, "review_plan"
             )
         except (LookupError, RecordNotFound) as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc

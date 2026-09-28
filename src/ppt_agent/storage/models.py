@@ -375,6 +375,25 @@ class ProviderAttemptRecord(TimestampMixin, Base):
     response_summary: Mapped[dict[str, Any] | None] = mapped_column(JSON)
 
 
+class ProviderTextResultRecord(TimestampMixin, Base):
+    """Validated structured output persisted before an operation is selected."""
+
+    __tablename__ = "provider_text_results"
+
+    operation_id: Mapped[str] = mapped_column(
+        ForeignKey("provider_operations.id", ondelete="CASCADE"), primary_key=True
+    )
+    attempt_id: Mapped[str] = mapped_column(
+        ForeignKey("provider_attempts.id", ondelete="CASCADE"),
+        nullable=False,
+        unique=True,
+    )
+    schema_name: Mapped[str] = mapped_column(String(150), nullable=False)
+    schema_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    output_payload: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    usage: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+
+
 class ProviderRetryAuthorizationRecord(TimestampMixin, Base):
     __tablename__ = "provider_retry_authorizations"
     __table_args__ = (

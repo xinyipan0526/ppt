@@ -21,6 +21,7 @@ from ppt_agent.storage.models import (
     ProviderAttemptRecord,
     ProviderOperationRecord,
     ProviderRetryAuthorizationRecord,
+    ProviderTextResultRecord,
     UsageRecord,
     WorkflowRunRecord,
     WorkflowStepRecord,
@@ -93,6 +94,17 @@ class AttemptSnapshot:
     usage_record_id: str | None
     error_code: str | None
     response_summary: dict[str, Any] | None
+
+
+@dataclass(frozen=True, slots=True)
+class StoredTextResult:
+    operation_id: str
+    attempt_id: str
+    request_fingerprint: str
+    schema_name: str
+    schema_version: int
+    output_payload: dict[str, Any]
+    usage: dict[str, int]
 
 
 NONTERMINAL_ATTEMPT_STATUSES = {
@@ -260,6 +272,11 @@ class ProviderOperationService:
         attempt_id: str,
         usage: UsageInput,
         response_summary: dict[str, Any] | None = None,
+        *,
+        schema_name: str | None = None,
+        schema_version: int | None = None,
+        output_payload: dict[str, Any] | None = None,
+        text_usage: dict[str, int] | None = None,
     ) -> AttemptSnapshot:
         with session_scope(self._sessions) as session:
             self._ledger.begin_write_transaction(session)
@@ -279,9 +296,42 @@ class ProviderOperationService:
             attempt.response_received_at = datetime.now(UTC)
             attempt.response_summary = response_summary
             operation = self._require_operation(session, attempt.operation_id)
+            text_values = (schema_name, schema_version, output_payload, text_usage)
+            if any(value is not None for value in text_values):
+                if not all(value is not None for value in text_values):
+                    raise OperationConflict("durable text result fields must be complete")
+                session.add(
+                    ProviderTextResultRecord(
+                        operation_id=operation.id,
+                        attempt_id=attempt.id,
+                        schema_name=schema_name,  # type: ignore[arg-type]
+                        schema_version=schema_version,  # type: ignore[arg-type]
+                        output_payload=dict(output_payload or {}),
+                        usage=dict(text_usage or {}),
+                    )
+                )
+                session.flush()
             operation.selected_attempt_id = attempt.id
             self._recompute_operation(session, operation.id)
             return self._attempt_snapshot(attempt)
+
+    def get_text_result(self, operation_id: str) -> StoredTextResult | None:
+        with session_scope(self._sessions) as session:
+            operation = session.get(ProviderOperationRecord, operation_id)
+            if operation is None or operation.selected_attempt_id is None:
+                return None
+            record = session.get(ProviderTextResultRecord, operation_id)
+            if record is None or record.attempt_id != operation.selected_attempt_id:
+                raise OperationConflict("selected text operation has no durable result")
+            return StoredTextResult(
+                operation_id=operation.id,
+                attempt_id=record.attempt_id,
+                request_fingerprint=operation.request_fingerprint,
+                schema_name=record.schema_name,
+                schema_version=record.schema_version,
+                output_payload=dict(record.output_payload),
+                usage={key: int(value) for key, value in record.usage.items()},
+            )
 
     def record_known_failure(
         self,

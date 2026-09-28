@@ -1,6 +1,8 @@
 """Transactional planning input and stage persistence."""
 
+from collections import deque
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Literal
 from uuid import uuid4
 
@@ -8,12 +10,26 @@ from pydantic import Field, model_validator
 from sqlalchemy import func, select
 
 from ppt_agent.domain.contracts import ContractModel
-from ppt_agent.domain.state_machine import RunStatus, StepStatus
+from ppt_agent.domain.artifacts import CONTENT_DEPENDENCY_EDGES, ArtifactStatus
+from ppt_agent.domain.state_machine import (
+    PageEvent,
+    PageStatus,
+    RunEvent,
+    RunStatus,
+    StepEvent,
+    StepStatus,
+    transition_page,
+    transition_run,
+    transition_step,
+)
 from ppt_agent.events.persistence import append_event_record
 from ppt_agent.runtime.repository import RunSnapshot, StepSnapshot, WorkflowRepository
 from ppt_agent.storage.database import SessionFactory, session_scope
 from ppt_agent.storage.models import (
     InterruptStatus,
+    ArtifactEdgeRecord,
+    ArtifactRecord,
+    PageRecord,
     PlanningInputRecord,
     ProjectRecord,
     WorkflowRunRecord,
@@ -223,6 +239,53 @@ class PlanningStore:
                 status=step.status,
             )
 
+    def complete_page_specs(
+        self, step_id: str, output_refs: tuple[str, ...]
+    ) -> StepSnapshot:
+        with session_scope(self._sessions) as session:
+            step = session.get(WorkflowStepRecord, step_id)
+            if step is None:
+                raise LookupError(f"step not found: {step_id}")
+            if step.status is not StepStatus.RUNNING:
+                raise ValueError("only a running step can complete")
+            for page_index, artifact_id in enumerate(output_refs, start=1):
+                page = session.scalar(
+                    select(PageRecord).where(
+                        PageRecord.run_id == step.run_id,
+                        PageRecord.page_index == page_index,
+                    )
+                )
+                if page is None:
+                    page = PageRecord(
+                        id=str(uuid4()),
+                        run_id=step.run_id,
+                        page_index=page_index,
+                        status=PageStatus.PLANNED,
+                    )
+                    session.add(page)
+                page.page_spec_version_id = artifact_id
+            step.status = StepStatus.SUCCEEDED
+            step.output_refs = list(output_refs)
+            append_event_record(
+                session,
+                run_id=step.run_id,
+                event_type="step.completed",
+                step_id=step.id,
+                payload={
+                    "step_id": step.id,
+                    "step_key": step.step_key,
+                    "generation": step.generation,
+                    "output_refs": list(output_refs),
+                },
+            )
+            return StepSnapshot(
+                id=step.id,
+                run_id=step.run_id,
+                step_key=step.step_key,
+                generation=step.generation,
+                status=step.status,
+            )
+
     def stage_output_refs(self, run_id: str, stage: PlanningStage) -> tuple[str, ...]:
         with session_scope(self._sessions) as session:
             step = session.scalar(
@@ -235,6 +298,21 @@ class PlanningStore:
                 .order_by(WorkflowStepRecord.generation.desc())
             )
             return () if step is None else tuple(step.output_refs or ())
+
+    def available_stage_output_refs(
+        self, run_id: str, stage: PlanningStage
+    ) -> tuple[str, ...]:
+        refs = self.stage_output_refs(run_id, stage)
+        if not refs:
+            return ()
+        with session_scope(self._sessions) as session:
+            records = [session.get(ArtifactRecord, artifact_id) for artifact_id in refs]
+            if any(
+                record is None or record.status is not ArtifactStatus.AVAILABLE
+                for record in records
+            ):
+                return ()
+        return refs
 
     def step_resume_payload(self, step_id: str) -> dict | None:
         with session_scope(self._sessions) as session:
@@ -259,7 +337,8 @@ class PlanningStore:
             )
             if current is None:
                 raise LookupError(f"planning input not found: {run_id}")
-            if current.clarification_answers == answers:
+            merged = {**(current.clarification_answers or {}), **answers}
+            if current.clarification_answers == merged:
                 return self._input_snapshot(current)
             record = PlanningInputRecord(
                 id=str(uuid4()),
@@ -270,7 +349,7 @@ class PlanningStore:
                 feedback=None,
                 revision_scope=None,
                 page_indexes=[],
-                clarification_answers=dict(answers),
+                clarification_answers=merged,
             )
             session.add(record)
             session.flush()
@@ -280,7 +359,7 @@ class PlanningStore:
                 event_type="planning.clarification_recorded",
                 payload={
                     "input_generation": record.generation,
-                    "answer_fields": sorted(answers),
+                    "answer_fields": sorted(merged),
                 },
             )
             return self._input_snapshot(record)
@@ -301,8 +380,70 @@ class PlanningStore:
                 payload={"status": RunStatus.SUCCEEDED.value, "result_refs": list(result_refs)},
             )
 
+    def finish_review(
+        self,
+        run_id: str,
+        step_id: str,
+        bundle_id: str,
+        result_refs: tuple[str, ...],
+    ) -> None:
+        with session_scope(self._sessions) as session:
+            run = session.get(WorkflowRunRecord, run_id)
+            step = session.get(WorkflowStepRecord, step_id)
+            if run is None or step is None or step.run_id != run_id:
+                raise LookupError("planning review state not found")
+            if run.status is not RunStatus.RUNNING or step.status is not StepStatus.RUNNING:
+                raise ValueError("planning review is not running")
+            step.status = transition_step(step.status, StepEvent.COMPLETED)
+            step.output_refs = [bundle_id]
+            run.status = transition_run(
+                run.status, RunEvent.ALL_REQUIRED_STEPS_SUCCEEDED
+            )
+            run.result_refs = [bundle_id, *result_refs]
+            for page in session.scalars(
+                select(PageRecord).where(PageRecord.run_id == run_id)
+            ):
+                if page.status is PageStatus.PLANNED:
+                    page.status = transition_page(page.status, PageEvent.APPROVED)
+            append_event_record(
+                session,
+                run_id=run_id,
+                event_type="planning.approved",
+                step_id=step_id,
+                payload={"bundle_ref": bundle_id, "status": RunStatus.SUCCEEDED.value},
+            )
+
+    def cancel_review(self, run_id: str, step_id: str) -> None:
+        with session_scope(self._sessions) as session:
+            run = session.get(WorkflowRunRecord, run_id)
+            step = session.get(WorkflowStepRecord, step_id)
+            if run is None or step is None or step.run_id != run_id:
+                raise LookupError("planning review state not found")
+            if run.status is not RunStatus.RUNNING or step.status is not StepStatus.RUNNING:
+                raise ValueError("planning review is not running")
+            step.status = transition_step(step.status, StepEvent.CANCEL_REQUESTED)
+            step.status = transition_step(
+                step.status, StepEvent.CANCELLATION_COMPLETED
+            )
+            run.status = transition_run(run.status, RunEvent.CANCEL_REQUESTED)
+            run.status = transition_run(
+                run.status, RunEvent.CANCELLATION_COMPLETED
+            )
+            append_event_record(
+                session,
+                run_id=run_id,
+                event_type="planning.cancelled",
+                step_id=step_id,
+                payload={"status": RunStatus.CANCELLED.value},
+            )
+
     def apply_revision(
-        self, run_id: str, request: PlanRevisionRequest
+        self,
+        run_id: str,
+        request: PlanRevisionRequest,
+        *,
+        review_step_id: str | None = None,
+        stale_roots: tuple[str, ...] = (),
     ) -> tuple[str, ...]:
         start_by_scope = {
             "brief": 0,
@@ -320,6 +461,17 @@ class PlanningStore:
             )
             if current is None:
                 raise LookupError(f"planning input not found: {run_id}")
+            if review_step_id is not None:
+                review = session.get(WorkflowStepRecord, review_step_id)
+                if (
+                    review is None
+                    or review.run_id != run_id
+                    or review.status is not StepStatus.RUNNING
+                ):
+                    raise ValueError("planning review is not running")
+                review.status = StepStatus.SUCCEEDED
+                review.output_refs = []
+            self._mark_stale_in_session(session, stale_roots)
             session.add(
                 PlanningInputRecord(
                     id=str(uuid4()),
@@ -367,6 +519,31 @@ class PlanningStore:
                 },
             )
         return tuple(affected)
+
+    @staticmethod
+    def _mark_stale_in_session(session, roots: tuple[str, ...]) -> None:
+        pending = deque(roots)
+        seen: set[str] = set()
+        now = datetime.now(UTC)
+        while pending:
+            artifact_id = pending.popleft()
+            if artifact_id in seen:
+                continue
+            seen.add(artifact_id)
+            artifact = session.get(ArtifactRecord, artifact_id)
+            if artifact is None:
+                raise LookupError(f"artifact not found: {artifact_id}")
+            if artifact.status is ArtifactStatus.AVAILABLE:
+                artifact.status = ArtifactStatus.STALE
+                artifact.retention_since = now
+            pending.extend(
+                session.scalars(
+                    select(ArtifactEdgeRecord.target_artifact_id).where(
+                        ArtifactEdgeRecord.source_artifact_id == artifact_id,
+                        ArtifactEdgeRecord.edge_type.in_(CONTENT_DEPENDENCY_EDGES),
+                    )
+                )
+            )
 
     @staticmethod
     def _previous_output_refs(session, run_id: str, stage: str) -> list[str]:

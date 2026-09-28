@@ -465,6 +465,20 @@ class ArtifactStore:
             )
             return tuple(self._snapshot(record) for record in records)
 
+    def list_versions(
+        self, project_id: str, logical_id: str
+    ) -> tuple[ArtifactSnapshot, ...]:
+        with session_scope(self._sessions) as session:
+            records = session.scalars(
+                select(ArtifactRecord)
+                .where(
+                    ArtifactRecord.project_id == project_id,
+                    ArtifactRecord.logical_id == logical_id,
+                )
+                .order_by(ArtifactRecord.version.desc())
+            )
+            return tuple(self._snapshot(record) for record in records)
+
     def mark_stale(self, artifact_id: str) -> tuple[str, ...]:
         now = datetime.now(UTC)
         changed: list[str] = []

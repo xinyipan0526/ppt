@@ -21,6 +21,7 @@ from ppt_agent.domain.contracts import (
 from ppt_agent.domain.state_machine import RunEvent, RunStatus, StepEvent, StepStatus
 from ppt_agent.domain.providers import OperationAggregateStatus
 from ppt_agent.operations.text_runner import TextPricing
+from ppt_agent.providers.text import ProviderCallError
 from ppt_agent.storage.database import (
     DatabaseConfig,
     create_session_factory,
@@ -32,6 +33,7 @@ from ppt_agent.storage.models import (
     Base,
     InterruptStatus,
     PlanningInputRecord,
+    PageRecord,
     ProjectRecord,
     ProviderOperationRecord,
     WorkflowInterruptRecord,
@@ -117,6 +119,21 @@ def test_revision_rejects_duplicate_page_indexes() -> None:
         )
 
 
+def test_clarification_generations_merge_answers() -> None:
+    engine, _, store, project_id = setup_store()
+    try:
+        run = store.create_run(project_id, (), "Roadmap")
+        store.record_clarification(run.id, {"audience": "engineers"})
+        merged = store.record_clarification(run.id, {"tone": "formal"})
+    finally:
+        engine.dispose()
+
+    assert merged.clarification_answers == {
+        "audience": "engineers",
+        "tone": "formal",
+    }
+
+
 class ScriptedRunner:
     def __init__(self, outputs: list[object], sessions) -> None:
         self.outputs = deque(outputs)
@@ -157,6 +174,18 @@ class ScriptedRunner:
             operation_id=kwargs["operation"].operation_id,
             output=output,
             usage=SimpleNamespace(input_tokens=1, output_tokens=1),
+        )
+
+
+class FailingRunner:
+    async def execute(self, **_kwargs):
+        raise ProviderCallError(
+            "temporary_unavailable",
+            True,
+            False,
+            False,
+            None,
+            {"http_status": 503},
         )
 
 
@@ -202,6 +231,31 @@ def setup_workflow(outputs: list[object]):
         reservation_minor_units=100,
     )
     return engine, sessions, store, workflow, runner, project_id
+
+
+def test_uncertain_http_failure_requires_recovery_instead_of_failing_run() -> None:
+    engine, sessions, store, project_id = setup_store()
+    workflow = DeckPlanningWorkflow(
+        store=store,
+        artifacts=ArtifactStore(
+            sessions, Path(".cache/test-deck-workflow") / str(uuid4())
+        ),
+        runner=FailingRunner(),
+        account_id="fake-account",
+        pricing=TextPricing("deepseek-v1", "CNY", 1, 1),
+        model="deepseek-chat",
+        reservation_minor_units=100,
+    )
+    try:
+        run = asyncio.run(
+            workflow.create_run(project_id=project_id, normalized_text="Roadmap")
+        )
+        asyncio.run(workflow.execute(run.id))
+        snapshot = store.repository.get_run(run.id)
+    finally:
+        engine.dispose()
+
+    assert snapshot.status is RunStatus.RECOVERY_REQUIRED
 
 
 def pending_interrupt(sessions, run_id: str):
@@ -330,6 +384,126 @@ def test_design_revision_stales_downstream_and_preserves_upstream_versions() -> 
     assert len(runner.requests) == 6
 
 
+def test_targeted_page_revision_passes_feedback_and_preserves_other_page_ref() -> None:
+    outputs = planning_outputs()
+    patch = {
+        "pages": [
+            PageSpec(
+                page_index=2,
+                objective="p2",
+                page_type="content",
+                title="Revised second page",
+            ).model_dump(mode="json")
+        ]
+    }
+    engine, sessions, store, workflow, runner, project_id = setup_workflow(
+        [*outputs, patch]
+    )
+    try:
+        run = asyncio.run(
+            workflow.create_run(project_id=project_id, normalized_text="Roadmap")
+        )
+        asyncio.run(workflow.execute(run.id))
+        old_refs = store.stage_output_refs(run.id, "build_page_specs")
+        review = pending_interrupt(sessions, run.id)
+        store.repository.resume_interrupt(
+            review.id,
+            expected_version=1,
+            payload={
+                "action": "revise",
+                "feedback": "Make page two concrete",
+                "scope": "pages",
+                "page_indexes": [2],
+            },
+        )
+        asyncio.run(workflow.execute(run.id))
+        new_refs = store.stage_output_refs(run.id, "build_page_specs")
+        with session_scope(sessions) as session:
+            page_rows = list(
+                session.scalars(
+                    select(PageRecord)
+                    .where(PageRecord.run_id == run.id)
+                    .order_by(PageRecord.page_index)
+                )
+            )
+    finally:
+        engine.dispose()
+
+    request_content = runner.requests[-1].user_content
+    assert "Make page two concrete" in request_content
+    assert '"page_indexes": [2]' in request_content
+    assert new_refs[0] == old_refs[0]
+    assert new_refs[1] != old_refs[1]
+    assert [page.page_spec_version_id for page in page_rows] == list(new_refs)
+
+
+def test_approval_recovers_bundle_after_crash_before_state_commit() -> None:
+    engine, sessions, store, workflow, runner, project_id = setup_workflow(
+        planning_outputs()
+    )
+    try:
+        run = asyncio.run(
+            workflow.create_run(project_id=project_id, normalized_text="Roadmap")
+        )
+        asyncio.run(workflow.execute(run.id))
+        review = pending_interrupt(sessions, run.id)
+        store.repository.resume_interrupt(
+            review.id, expected_version=1, payload={"action": "approve"}
+        )
+        original = store.finish_review
+        crashed = False
+
+        def crash_once(*args, **kwargs):
+            nonlocal crashed
+            if not crashed:
+                crashed = True
+                raise RuntimeError("crash after bundle commit")
+            return original(*args, **kwargs)
+
+        store.finish_review = crash_once
+        with pytest.raises(RuntimeError, match="bundle commit"):
+            asyncio.run(workflow.execute(run.id))
+        store.finish_review = original
+        store.repository.mark_run_recovery_required(run.id, reason="process restart")
+        store.repository.mark_recovery_retry_safe(
+            run.id, evidence="bundle artifact is available"
+        )
+        asyncio.run(workflow.execute(run.id))
+        final = store.repository.get_run(run.id)
+        with session_scope(sessions) as session:
+            bundle_count = session.scalar(
+                select(func.count())
+                .select_from(ArtifactRecord)
+                .where(ArtifactRecord.kind == "planning.bundle")
+            )
+    finally:
+        engine.dispose()
+
+    assert final.status is RunStatus.SUCCEEDED
+    assert bundle_count == 1
+
+
+def test_review_cancel_finishes_without_waiting_for_restart() -> None:
+    engine, sessions, store, workflow, _, project_id = setup_workflow(
+        planning_outputs()
+    )
+    try:
+        run = asyncio.run(
+            workflow.create_run(project_id=project_id, normalized_text="Roadmap")
+        )
+        asyncio.run(workflow.execute(run.id))
+        review = pending_interrupt(sessions, run.id)
+        store.repository.resume_interrupt(
+            review.id, expected_version=1, payload={"action": "cancel"}
+        )
+        asyncio.run(workflow.execute(run.id))
+        cancelled = store.repository.get_run(run.id)
+    finally:
+        engine.dispose()
+
+    assert cancelled.status is RunStatus.CANCELLED
+
+
 def test_review_cancel_stops_without_new_provider_or_artifact_side_effects() -> None:
     engine, sessions, store, workflow, runner, project_id = setup_workflow(
         planning_outputs()
@@ -355,7 +529,7 @@ def test_review_cancel_stops_without_new_provider_or_artifact_side_effects() -> 
     finally:
         engine.dispose()
 
-    assert cancelled.status is RunStatus.CANCEL_REQUESTED
+    assert cancelled.status is RunStatus.CANCELLED
     assert len(runner.requests) == calls
     assert final_artifacts == artifacts
 

@@ -97,6 +97,19 @@ class PageSpecs(ContractModel):
         return self
 
 
+class PageSpecPatch(ContractModel):
+    """Only the pages selected by a targeted revision."""
+
+    pages: tuple[PageSpec, ...] = Field(min_length=1, max_length=50)
+
+    @model_validator(mode="after")
+    def validate_unique_indexes(self) -> "PageSpecPatch":
+        indexes = [page.page_index for page in self.pages]
+        if len(indexes) != len(set(indexes)):
+            raise ValueError("page patch indexes must be unique")
+        return self
+
+
 class PlanningBundle(ContractModel):
     brief_artifact_id: str = Field(min_length=1)
     outline_artifact_id: str = Field(min_length=1)

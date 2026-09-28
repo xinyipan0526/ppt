@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 from datetime import UTC, datetime
+import re
 from typing import Any
 from uuid import uuid4
 
@@ -177,7 +178,7 @@ class WorkflowRepository:
             self._append_event(
                 session,
                 run_id=record.run_id,
-                event_type=f"step.{event.value}",
+                event_type=f"step.{_event_identifier(event.value)}",
                 payload=event_payload,
             )
             return self._step_snapshot(record)
@@ -452,3 +453,8 @@ class WorkflowRepository:
             form_schema=record.form_schema,
             resume_payload=record.resume_payload,
         )
+
+
+def _event_identifier(value: str) -> str:
+    snake = re.sub(r"(?<!^)(?=[A-Z])", "_", value).casefold()
+    return snake

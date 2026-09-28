@@ -112,11 +112,12 @@ git status --short
 | `bc6ad55` | 严格规划领域契约、澄清表单与计划复核协议 |
 | `8816bd8` | DeepSeek 结构化文本适配、Operation/Attempt 与计费结算闭环 |
 | `0d276e0` | PlanningStore、版本化 Prompt 与确定性 Deck Planning Workflow |
-| 本提交 | 规划 HTTP API、运行时 Workflow 组合与 opt-in Provider live test |
+| `2c942d0` | 规划 HTTP API、运行时 Workflow 组合与 opt-in Provider live test |
+| 本提交 | 独立审查修复：付费结果落盘、原子复核、定向页修订与安全计费边界 |
 
 截至当前基础设施里程碑：
 
-- 全量测试为 `237 passed, 3 skipped`；两项跳过来自当前 Windows 账户无法创建符号链接，一项为默认关闭的真实 DeepSeek 计费测试。
+- 全量测试为 `245 passed, 3 skipped`；两项跳过来自当前 Windows 账户无法创建符号链接，一项为默认关闭的真实 DeepSeek 计费测试。
 - 事件序号通过 Run 行上的原子 `UPDATE ... RETURNING` 分配。
 - 状态变化与核心事件在同一事务提交。
 - SSE 支持一致快照、`Last-Event-ID`、游标过期和有界批量读取。
@@ -135,6 +136,9 @@ git status --short
 - 规划中间结果使用版本化 Artifact 和依赖边保存；进程在 Artifact 提交后、Step 提交前崩溃时可从 operation_id 对账恢复而不重复调用 Provider。
 - 规划创建、查询和 Resume API 已接入 Host、Origin、Bearer、项目/Run 所有权与 `InputLimits`；浏览器连接仅投影状态，不拥有后台任务生命周期。
 - ApplicationRuntime 可在 migrations、Artifact 对账和恢复扫描后组合 Planning Workflow，再启动 Supervisor 并开放 readiness。
+- 结构化 Provider 成功结果在 Attempt 被选定前与 Usage 原子落入 `provider_text_results`；即使进程在返回后、Artifact 创建前崩溃，也可重放已验证结果而不产生第二次调用。
+- 复核批准/取消及修订代际创建已收敛为事务边界；Bundle 和 PageSpec Patch 具备确定性恢复键，定向页修订只替换选中页并保留未选中页引用。
+- HTTP 429/5xx 和未映射错误不再仅凭状态码释放预算；保守最大 Token 成本必须由预留覆盖，计费不确定结果进入人工恢复路径。
 
 ## 6. 下一步
 
@@ -155,6 +159,9 @@ git status --short
 - Workspace 路径审查裁决：并发换链 TOCTOU 需要已取得同一 OS 用户权限的恶意进程，超出一期威胁模型；静态链接在 I/O 前拒绝，写入/重命名后仍复核。
 - 当前 Windows 测试环境不能创建符号链接；在具备开发者模式或 CI 权限的 Windows 环境中仍需运行 link/junction 用例。
 - Seedream、视觉理解、Renderer、输入解析/OCR、导出和前端尚未进入实现阶段；当前 live Provider 测试只有在显式设置开关及全部 DeepSeek 配置时才会产生真实请求。
+- 当前默认导出的 `app` 仍只提供未配置的应用骨架；实际规划路由通过 `create_app` 显式注入 Runtime、Workflow、Supervisor、认证和资源授权。面向最终用户的环境变量/配置文件启动器应与下一阶段应用配置一起实现。
+- Provider 的 `retryable` 目前只用于能力映射，不自动定时重试；这是为了避免在尚无持久化计时调度器时产生隐式重复费用。已知失败由用户显式重试，计费不确定失败必须先完成恢复或风险确认。
+- 意图是否需要澄清仍由受 Schema 约束的 Brief 决策模型判断；不可信输入边界已改为 JSON 字符串编码并转义闭合标记，但尚未增加领域专用的确定性“信息充分度”规则。
 
 这些待办不能因上下文清理而丢失，也不应在无关模块中顺手实现。
 
