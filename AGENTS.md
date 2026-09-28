@@ -113,7 +113,7 @@ git status --short
 | `8816bd8` | DeepSeek 结构化文本适配、Operation/Attempt 与计费结算闭环 |
 | `0d276e0` | PlanningStore、版本化 Prompt 与确定性 Deck Planning Workflow |
 | `2c942d0` | 规划 HTTP API、运行时 Workflow 组合与 opt-in Provider live test |
-| 本提交 | 独立审查修复：付费结果落盘、原子复核、定向页修订与安全计费边界 |
+| `cbdde09` | 独立审查修复：付费结果落盘、原子复核、定向页修订与安全计费边界 |
 
 截至当前基础设施里程碑：
 
