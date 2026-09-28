@@ -137,3 +137,41 @@ def test_cancelling_recovery_requires_dedicated_executor() -> None:
         assert cancelled == [run.id]
 
     asyncio.run(scenario())
+
+
+def test_runtime_can_compose_supervisor_from_planning_workflow_factory() -> None:
+    async def scenario() -> None:
+        built_with: list[tuple[object, object, object]] = []
+
+        class PlanningWorkflow:
+            async def execute(self, _run_id: str) -> None:
+                return None
+
+        workflow = PlanningWorkflow()
+
+        def build(sessions, artifacts, repository):
+            built_with.append((sessions, artifacts, repository))
+            return workflow
+
+        runtime = ApplicationRuntime(
+            ApplicationRuntimeConfig(
+                workspace=workspace_path(),
+                minimum_free_bytes=0,
+                maintenance_interval=60,
+            ),
+            planning_workflow_factory=build,
+            filesystem_classifier=lambda _path: FilesystemKind.LOCAL,
+        )
+        await runtime.start()
+        try:
+            assert runtime.planning_workflow is workflow
+            assert runtime.supervisor is not None
+            assert len(built_with) == 1
+            assert built_with[0][1] is runtime.artifacts
+            assert built_with[0][2] is runtime.repository
+        finally:
+            await runtime.stop()
+
+        assert runtime.planning_workflow is None
+
+    asyncio.run(scenario())

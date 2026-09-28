@@ -21,7 +21,11 @@ from ppt_agent.storage.capabilities import (
     WorkspaceCapabilities,
     probe_workspace,
 )
-from ppt_agent.storage.database import create_session_factory, create_sqlite_engine
+from ppt_agent.storage.database import (
+    SessionFactory,
+    create_session_factory,
+    create_sqlite_engine,
+)
 from ppt_agent.storage.locking import WorkspaceInstanceLock
 from ppt_agent.storage.maintenance import run_migrations, verify_database_integrity
 from ppt_agent.storage.workspace import WorkspacePaths
@@ -49,20 +53,35 @@ class ApplicationRuntimeConfig:
             raise ValueError("maintenance_shutdown_timeout must be non-negative")
 
 
+class PlanningWorkflowExecutor:
+    async def execute(self, run_id: str) -> None: ...
+
+
+PlanningWorkflowFactory = Callable[
+    [SessionFactory, ArtifactStore, WorkflowRepository], PlanningWorkflowExecutor
+]
+
+
 class ApplicationRuntime:
     """Own all process-lifetime resources and expose readiness explicitly."""
 
     def __init__(
         self,
         config: ApplicationRuntimeConfig,
-        executor: RunExecutor,
+        executor: RunExecutor | None = None,
         *,
+        planning_workflow_factory: PlanningWorkflowFactory | None = None,
         filesystem_classifier: FilesystemClassifier | None = None,
         migration_runner: Callable[[Path], None] = run_migrations,
         cancellation_executor: RunExecutor | None = None,
     ) -> None:
+        if (executor is None) == (planning_workflow_factory is None):
+            raise ValueError(
+                "provide exactly one of executor or planning_workflow_factory"
+            )
         self.config = config
         self._executor = executor
+        self._planning_workflow_factory = planning_workflow_factory
         self._classifier = filesystem_classifier
         self._migration_runner = migration_runner
         self._cancellation_executor = cancellation_executor
@@ -72,6 +91,7 @@ class ApplicationRuntime:
         self.event_store: WorkflowEventStore | None = None
         self.artifacts: ArtifactStore | None = None
         self.supervisor: TaskSupervisor | None = None
+        self.planning_workflow: PlanningWorkflowExecutor | None = None
         self.recovery_plan: RecoveryPlan | None = None
         self.reconciliation_report: ReconciliationReport | None = None
         self._lock: WorkspaceInstanceLock | None = None
@@ -123,9 +143,17 @@ class ApplicationRuntime:
                     "startup recovery requires a cancellation executor for "
                     "cancel_requested runs"
                 )
+            executor = self._executor
+            if self._planning_workflow_factory is not None:
+                self.planning_workflow = self._planning_workflow_factory(
+                    sessions, self.artifacts, self.repository
+                )
+                executor = self.planning_workflow.execute
+            if executor is None:  # guarded by constructor; narrows the type here
+                raise RuntimeError("runtime executor is unavailable")
             self.supervisor = TaskSupervisor(
                 self.repository,
-                self._executor,
+                executor,
                 global_limit=self.config.global_limit,
                 project_limit=self.config.project_limit,
                 cancellation_executor=self._cancellation_executor,
@@ -174,6 +202,7 @@ class ApplicationRuntime:
                 failure = failure or exc
             finally:
                 self.supervisor = None
+        self.planning_workflow = None
         if self.engine is not None:
             try:
                 await asyncio.to_thread(self.engine.dispose)

@@ -31,6 +31,9 @@ packages = ["src/ppt_agent"]
 addopts = "-ra --strict-config --strict-markers -p no:cacheprovider"
 testpaths = ["tests"]
 pythonpath = ["src"]
+markers = [
+  "live_provider: opt-in tests that can call and charge a real provider account",
+]
 
 [tool.coverage.run]
 branch = true

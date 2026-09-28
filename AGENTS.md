@@ -108,11 +108,15 @@ git status --short
 | `09196e9` | Artifact 生命周期、提交、依赖、失效、GC 和对账 |
 | `adb5364` | Workflow 事件快照、游标续传和 SSE 投影 |
 | `8588af7` | Workspace 路径/ZIP 安全、单实例锁、存储能力探测与 SQLite/Artifact 接线 |
-| 本提交 | 本地 HTTP 安全、恢复协议、TaskSupervisor、备份恢复、应用组合与维护循环 |
+| `81862c1` | 本地 HTTP 安全、恢复协议、TaskSupervisor、备份恢复、应用组合与维护循环 |
+| `bc6ad55` | 严格规划领域契约、澄清表单与计划复核协议 |
+| `8816bd8` | DeepSeek 结构化文本适配、Operation/Attempt 与计费结算闭环 |
+| `0d276e0` | PlanningStore、版本化 Prompt 与确定性 Deck Planning Workflow |
+| 本提交 | 规划 HTTP API、运行时 Workflow 组合与 opt-in Provider live test |
 
 截至当前基础设施里程碑：
 
-- 全量测试为 `199 passed, 2 skipped`；两项跳过来自当前 Windows 账户无法创建符号链接，其余安全、恢复、迁移、备份和运行时回归测试均已运行。
+- 全量测试为 `237 passed, 3 skipped`；两项跳过来自当前 Windows 账户无法创建符号链接，一项为默认关闭的真实 DeepSeek 计费测试。
 - 事件序号通过 Run 行上的原子 `UPDATE ... RETURNING` 分配。
 - 状态变化与核心事件在同一事务提交。
 - SSE 支持一致快照、`Last-Event-ID`、游标过期和有界批量读取。
@@ -126,27 +130,31 @@ git status --short
 - 启动顺序已经固定为 Workspace 探测/锁、迁移/完整性、Artifact 对账、状态恢复、Supervisor 与 readiness；失败和关机按反向所有权清理。
 - 恢复扫描不会自动重放 `recovery_required` 或远端未知结果；只有持久化明确证据后才能将 Run 标记为 retry-safe。
 - TaskSupervisor 已实现 Run 去重、全局/项目/Provider 并发边界、取消专用执行路径和有界关闭；事件保留任务也有独立关闭上限。
+- DeepSeek 文本能力通过统一结构化 Provider 接口接入；提交意图先持久化，成功、已知未计费失败、已计费失败和远端结果未知分别结算，`outcome_unknown` 不自动重发。
+- Brief → DeckOutline → DesignSystem → PageSpec → 人工复核已形成可恢复闭环；意图不明确时创建版本化表单 Interrupt，Resume 先校验并原子持久化后再调度。
+- 规划中间结果使用版本化 Artifact 和依赖边保存；进程在 Artifact 提交后、Step 提交前崩溃时可从 operation_id 对账恢复而不重复调用 Provider。
+- 规划创建、查询和 Resume API 已接入 Host、Origin、Bearer、项目/Run 所有权与 `InputLimits`；浏览器连接仅投影状态，不拥有后台任务生命周期。
+- ApplicationRuntime 可在 migrations、Artifact 对账和恢复扫描后组合 Planning Workflow，再启动 Supervisor 并开放 readiness。
 
 ## 6. 下一步
 
-持久化、状态机与协议基础设施里程碑已经完成。下一开发批次应进入 **Provider 能力适配与确定性 Deck Workflow 骨架**：
+持久化、状态机、DeepSeek 文本适配和确定性规划闭环已经完成。下一开发批次应进入 **输入解析与渲染/图片能力**：
 
-- 先实现 DeepSeek 文本能力与统一 Provider capability/错误映射，复用现有 Operation/Attempt、预算和恢复协议。
-- 建立 Brief → DeckOutline → PageSpec → DesignSystem 的确定性 Workflow 接口，并把意图不明确分支接到现有 Interrupt/Resume。
-- 输入解析器开始接入时必须实际执行 `InputLimits`，隔离 PDF/图片/Markdown 不可信内容；配置模型本身不能替代解析时检查。
-- 随后实现 Seedream 图片能力、确定性文字排版/合成、单页重生成与导出链路。
+- 接入 Markdown、PDF 和图片解析器，实际执行字节数、页数、像素、压缩比、外部资源和超时限制，并将解析内容始终视为不可信数据。
+- 实现 Seedream 图片 Provider 能力与 Qwen 视觉理解适配，沿用现有 Operation/Attempt、预算预留和未知结果恢复协议。
+- 实现确定性 HTML/CSS/SVG 文字排版、整页合成、单页重生成，以及 PNG/JPG、ZIP、PDF 和图片型 PPTX 导出链路。
+- 在渲染链路稳定后再接入 React 规划复核界面和局部编辑 Sub-workflow。
 
 下一批仍不应提前扩展 React 前端或元素级可编辑 PPTX；先保持 Provider 与 Workflow 通过已完成的持久化协议闭环运行。
 
 ## 7. 已知待办与审查结论
 
-- Artifact 启动对账尚未接线，必须在 TaskSupervisor 启动前完成。
 - Artifact 维护操作需要由 Workspace 维护锁保护；跨 Store 并发文件移动仍应继续强化测试。
 - `artifact_references.project_id` 与 Artifact 项目一致性目前由服务层保证，数据库尚无复合外键。
 - Run 所有权规则仍由应用层注入的 `authorize_run` 实现；本地单用户令牌只提供应用级认证，不能替代资源级校验。
 - Workspace 路径审查裁决：并发换链 TOCTOU 需要已取得同一 OS 用户权限的恶意进程，超出一期威胁模型；静态链接在 I/O 前拒绝，写入/重命名后仍复核。
 - 当前 Windows 测试环境不能创建符号链接；在具备开发者模式或 CI 权限的 Windows 环境中仍需运行 link/junction 用例。
-- Provider、Renderer、OCR、前端和实际 Deck Workflow 均尚未进入实现阶段。
+- Seedream、视觉理解、Renderer、输入解析/OCR、导出和前端尚未进入实现阶段；当前 live Provider 测试只有在显式设置开关及全部 DeepSeek 配置时才会产生真实请求。
 
 这些待办不能因上下文清理而丢失，也不应在无关模块中顺手实现。
 

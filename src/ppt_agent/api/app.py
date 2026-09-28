@@ -16,8 +16,15 @@ from pydantic import BaseModel
 from ppt_agent import __version__
 from ppt_agent.api.security import (
     AccessTokenManager,
+    InputLimits,
     LocalHTTPSecurity,
     LocalRequestRejected,
+)
+from ppt_agent.api.planning import (
+    PlanningSupervisor,
+    PlanningWorkflow,
+    ProjectAuthorizer,
+    planning_router,
 )
 from ppt_agent.events.sse import EventStreamService
 from ppt_agent.runtime.application import ApplicationRuntime
@@ -41,6 +48,10 @@ def create_app(
     security: LocalHTTPSecurity | None = None,
     runtime: ApplicationRuntime | None = None,
     token_manager: AccessTokenManager | None = None,
+    planning_workflow: PlanningWorkflow | None = None,
+    planning_supervisor: PlanningSupervisor | None = None,
+    authorize_project: ProjectAuthorizer | None = None,
+    input_limits: InputLimits | None = None,
 ) -> FastAPI:
     """Create an application instance without import-time side effects."""
 
@@ -142,6 +153,29 @@ def create_app(
             )
 
     app.include_router(router)
+    planning_components = (
+        planning_workflow,
+        planning_supervisor,
+        authorize_project,
+    )
+    if any(value is not None for value in planning_components):
+        if (
+            not all(value is not None for value in planning_components)
+            or authorize_run is None
+        ):
+            raise ValueError("all planning route dependencies are required")
+        if not security.authentication_enabled:
+            raise ValueError("local authentication is required for planning routes")
+        app.include_router(
+            planning_router(
+                workflow=planning_workflow,  # type: ignore[arg-type]
+                supervisor=planning_supervisor,  # type: ignore[arg-type]
+                authorize_project=authorize_project,  # type: ignore[arg-type]
+                authorize_run=authorize_run,  # type: ignore[arg-type]
+                security=security,
+                input_limits=input_limits or InputLimits(),
+            )
+        )
     return app
 
 
