@@ -149,6 +149,20 @@ class MaterialStore:
             session.flush()
             return self._snapshot(record)
 
+    def remaining_upload_bytes(self, project_id: str) -> int:
+        """Return a preliminary project allowance; finalization rechecks atomically."""
+
+        with session_scope(self._sessions) as session:
+            if session.get(ProjectRecord, project_id) is None:
+                raise MaterialNotFound(f"project not found: {project_id}")
+            used = session.scalar(
+                select(func.coalesce(func.sum(SourceMaterialRecord.source_bytes), 0)).where(
+                    SourceMaterialRecord.project_id == project_id,
+                    SourceMaterialRecord.status != MaterialStatus.DELETED,
+                )
+            )
+            return max(0, self._max_project_bytes - int(used or 0))
+
     def claim(self, material_id: str) -> MaterialSnapshot | None:
         with session_scope(self._sessions) as session:
             self._begin_immediate(session)
@@ -179,13 +193,7 @@ class MaterialStore:
             record.error_code = None
             record.error_detail = None
             self._advance(record)
-            session.add(
-                ArtifactReferenceRecord(
-                    id=str(uuid4()), project_id=record.project_id,
-                    artifact_id=parsed_artifact_id, owner_type="source_material",
-                    owner_id=record.id, role="parsed",
-                )
-            )
+            self._ensure_parsed_reference(session, record)
             session.flush()
             return self._snapshot(record)
 
@@ -327,6 +335,14 @@ class MaterialStore:
                 elif record.status is MaterialStatus.READY:
                     artifact = session.get(ArtifactRecord, record.parsed_artifact_id)
                     if artifact is None or artifact.status is not ArtifactStatus.AVAILABLE:
+                        session.execute(
+                            delete(ArtifactReferenceRecord).where(
+                                ArtifactReferenceRecord.project_id == record.project_id,
+                                ArtifactReferenceRecord.owner_type == "source_material",
+                                ArtifactReferenceRecord.owner_id == record.id,
+                                ArtifactReferenceRecord.role == "parsed",
+                            )
+                        )
                         record.parsed_artifact_id = None
                         self._set_failed(
                             record, MaterialErrorCode.PARSED_ARTIFACT_UNAVAILABLE,
@@ -386,6 +402,8 @@ class MaterialStore:
                     owner_type="source_material", owner_id=record.id, role="parsed",
                 )
             )
+        else:
+            existing.artifact_id = record.parsed_artifact_id
 
     @staticmethod
     def _snapshot(record: SourceMaterialRecord) -> MaterialSnapshot:

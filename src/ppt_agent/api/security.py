@@ -124,10 +124,14 @@ class InputLimits:
     max_file_bytes: int = 50 * 1024 * 1024
     max_project_upload_bytes: int = 500 * 1024 * 1024
     max_image_pixels: int = 40_000_000
+    max_image_width: int = 16_384
+    max_image_height: int = 16_384
+    max_decoded_image_bytes: int = 256 * 1024 * 1024
     max_image_frames: int = 1
     max_pdf_pages: int = 200
     max_pdf_objects: int = 200_000
     max_markdown_characters: int = 2_000_000
+    max_planning_source_bytes: int = 8 * 1024 * 1024
     max_markdown_nesting: int = 32
     max_external_resources: int = 100
     max_compression_ratio: float = 100.0
@@ -138,10 +142,14 @@ class InputLimits:
             self.max_file_bytes,
             self.max_project_upload_bytes,
             self.max_image_pixels,
+            self.max_image_width,
+            self.max_image_height,
+            self.max_decoded_image_bytes,
             self.max_image_frames,
             self.max_pdf_pages,
             self.max_pdf_objects,
             self.max_markdown_characters,
+            self.max_planning_source_bytes,
             self.max_markdown_nesting,
             self.max_external_resources,
             self.max_compression_ratio,

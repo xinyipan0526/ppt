@@ -97,12 +97,14 @@ class DeckPlanningWorkflow:
         normalized_text: str,
         source_refs: tuple[str, ...] = (),
         validate_source_refs: bool = False,
+        source_material_refs: tuple[tuple[str, str], ...] = (),
     ):
         return self.store.create_run(
             project_id,
             source_refs,
             normalized_text,
             validate_source_refs=validate_source_refs,
+            source_material_refs=source_material_refs,
         )
 
     async def execute(self, run_id: str) -> None:
@@ -201,7 +203,7 @@ class DeckPlanningWorkflow:
             "planning.brief",
             "presentation_brief",
             decision.brief,
-            (),
+            current.source_refs,
             operation_id=self._operation_id(run_id, step),
         )
         self.store.complete_step(step.step_id, (artifact,))

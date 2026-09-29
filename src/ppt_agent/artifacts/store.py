@@ -272,6 +272,19 @@ class ArtifactStore:
                     pass
                 raise
 
+    def discard_staging(self, artifact_id: str) -> None:
+        """Logically discard an uncommitted upload and remove its partial file."""
+
+        with self._artifact_lock(artifact_id):
+            with session_scope(self._sessions) as session:
+                record = self._require(session, artifact_id)
+                if record.status is not ArtifactStatus.STAGING:
+                    raise ArtifactConflict("only a staging artifact can be discarded")
+                staging_path = record.staging_path
+                record.status = ArtifactStatus.DELETED
+                session.flush()
+            self._safe_unlink(self._resolve(staging_path))
+
     def _write_staging_unlocked(
         self,
         artifact_id: str,

@@ -57,7 +57,8 @@ def parse_pdf(request: ParseRequest) -> ParsedMaterialV1:
         raise ParserFailure(MaterialErrorCode.PDF_MALFORMED, "PDF cannot be parsed") from exc
     return ParsedMaterialV1(
         material_id=request.material_id, media_type="application/pdf",
-        source_artifact_id=request.source_artifact_id, text_blocks=tuple(blocks),
+        source_artifact_id=request.source_artifact_id,
+        untrusted_source_content=True, text_blocks=tuple(blocks),
         metadata=DocumentMetadataV1(page_count=page_count), warnings=tuple(warnings),
         parser_name="pdf", parser_version=PARSER_VERSION,
         limits_fingerprint=str(request.limits.get("limits_fingerprint", "limits:v1")),

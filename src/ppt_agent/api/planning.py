@@ -23,6 +23,10 @@ ProjectAuthorizer = Callable[[str], Awaitable[None]]
 RunAuthorizer = Callable[[str], Awaitable[None]]
 
 
+class PlanningSourceTooLarge(ValueError):
+    pass
+
+
 class PlanningWorkflow(Protocol):
     store: PlanningStore
 
@@ -33,6 +37,7 @@ class PlanningWorkflow(Protocol):
         normalized_text: str,
         source_refs: tuple[str, ...] = (),
         validate_source_refs: bool = False,
+        source_material_refs: tuple[tuple[str, str], ...] = (),
     ) -> Any: ...
 
 
@@ -102,17 +107,23 @@ def planning_router(
                 request.normalized_text,
                 resolved,
                 material_service,
+                input_limits.max_planning_source_bytes,
             )
             run = await workflow.create_run(
                 project_id=project_id,
                 normalized_text=compiled_text,
                 source_refs=source_refs,
                 validate_source_refs=bool(source_refs),
+                source_material_refs=tuple(
+                    (item.material.id, item.parsed_artifact.id) for item in resolved
+                ),
             )
         except MaterialNotFound as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except MaterialConflict as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except PlanningSourceTooLarge as exc:
+            raise HTTPException(status_code=413, detail=str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         except LookupError as exc:
@@ -202,12 +213,27 @@ def _compile_planning_sources(
     normalized_text: str,
     materials: tuple[ResolvedMaterial, ...],
     material_service: MaterialService | None,
+    max_bytes: int,
 ) -> tuple[str, tuple[str, ...]]:
     """Compile trusted transport fields and untrusted parsed blocks deterministically."""
 
-    records: list[dict[str, Any]] = []
+    encoded_records: list[bytes] = []
+    encoded_size = 0
+
+    def append(record: dict[str, Any]) -> None:
+        nonlocal encoded_size
+        encoded = json.dumps(
+            record, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+        encoded_size += len(encoded) + (1 if encoded_records else 0)
+        if encoded_size > max_bytes:
+            raise PlanningSourceTooLarge(
+                "compiled planning sources exceed the aggregate byte limit"
+            )
+        encoded_records.append(encoded)
+
     if normalized_text:
-        records.append({"kind": "typed_user_input", "text": normalized_text})
+        append({"kind": "typed_user_input", "text": normalized_text})
     if materials and material_service is None:
         raise RuntimeError("material service is required to compile materials")
     for resolved in materials:
@@ -222,7 +248,7 @@ def _compile_planning_sources(
             )
         if parsed.text_blocks:
             for block in parsed.text_blocks:
-                records.append(
+                append(
                     {
                         "kind": "untrusted_source_content",
                         "locator": block.locator.model_dump(mode="json", exclude_none=True),
@@ -233,7 +259,7 @@ def _compile_planning_sources(
                     }
                 )
         else:
-            records.append(
+            append(
                 {
                     "kind": "untrusted_source_content",
                     "material_id": parsed.material_id,
@@ -243,8 +269,5 @@ def _compile_planning_sources(
                     "text": "",
                 }
             )
-    compiled = "\n".join(
-        json.dumps(record, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-        for record in records
-    )
+    compiled = b"\n".join(encoded_records).decode("utf-8")
     return compiled, tuple(item.parsed_artifact.id for item in materials)

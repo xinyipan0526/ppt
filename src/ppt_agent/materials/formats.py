@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import codecs
 from enum import StrEnum
 
 from ppt_agent.domain.materials import MaterialErrorCode
@@ -52,7 +53,9 @@ def sniff_material(
         return MaterialFormat.WEBP
     if b"\x00" not in head:
         try:
-            head.decode("utf-8", errors="strict")
+            codecs.getincrementaldecoder("utf-8")(errors="strict").decode(
+                head, final=False
+            )
         except UnicodeDecodeError:
             pass
         else:

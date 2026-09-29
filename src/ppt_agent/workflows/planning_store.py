@@ -11,6 +11,7 @@ from sqlalchemy import func, select, text
 
 from ppt_agent.domain.contracts import ContractModel
 from ppt_agent.domain.artifacts import CONTENT_DEPENDENCY_EDGES, ArtifactStatus
+from ppt_agent.domain.materials import MaterialStatus
 from ppt_agent.domain.state_machine import (
     PageEvent,
     PageStatus,
@@ -32,6 +33,7 @@ from ppt_agent.storage.models import (
     PageRecord,
     PlanningInputRecord,
     ProjectRecord,
+    SourceMaterialRecord,
     WorkflowRunRecord,
     WorkflowInterruptRecord,
     WorkflowStepRecord,
@@ -104,6 +106,7 @@ class PlanningStore:
         normalized_text: str,
         *,
         validate_source_refs: bool = False,
+        source_material_refs: tuple[tuple[str, str], ...] = (),
     ) -> RunSnapshot:
         if not normalized_text.strip():
             raise ValueError("normalized planning text must not be empty")
@@ -126,6 +129,17 @@ class PlanningStore:
                     ):
                         raise ValueError(
                             f"source artifact is not an available parsed material: {artifact_id}"
+                        )
+                for material_id, artifact_id in source_material_refs:
+                    material = session.get(SourceMaterialRecord, material_id)
+                    if (
+                        material is None
+                        or material.project_id != project_id
+                        or material.status is not MaterialStatus.READY
+                        or material.parsed_artifact_id != artifact_id
+                    ):
+                        raise ValueError(
+                            f"source material is no longer ready: {material_id}"
                         )
             run = WorkflowRunRecord(
                 id=run_id,
@@ -570,7 +584,12 @@ class PlanningStore:
     def _previous_output_refs(session, run_id: str, stage: str) -> list[str]:
         index = PLANNING_STAGES.index(stage)  # type: ignore[arg-type]
         if index == 0:
-            return []
+            current = session.scalar(
+                select(PlanningInputRecord)
+                .where(PlanningInputRecord.run_id == run_id)
+                .order_by(PlanningInputRecord.generation.desc())
+            )
+            return [] if current is None else list(current.source_refs or ())
         previous = session.scalar(
             select(WorkflowStepRecord)
             .where(

@@ -34,6 +34,17 @@ def test_parsed_material_requires_untrusted_source_marker() -> None:
             material_id="material-1",
             media_type="text/markdown",
             source_artifact_id="artifact-1",
+            text_blocks=(block,),
+            parser_name="markdown",
+            parser_version="1",
+            limits_fingerprint="sha256:limits",
+        )
+
+    with pytest.raises(ValidationError):
+        ParsedMaterialV1(
+            material_id="material-1",
+            media_type="text/markdown",
+            source_artifact_id="artifact-1",
             untrusted_source_content=False,
             text_blocks=(block,),
             parser_name="markdown",
@@ -53,6 +64,7 @@ def test_parsed_material_round_trips_strict_versioned_json() -> None:
         material_id="material-1",
         media_type="text/markdown",
         source_artifact_id="artifact-1",
+        untrusted_source_content=True,
         text_blocks=(block,),
         parser_name="markdown",
         parser_version="1",

@@ -5,8 +5,11 @@ from __future__ import annotations
 import json
 import math
 import multiprocessing
+import os
 import shutil
 import tempfile
+import threading
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -49,9 +52,16 @@ def _parse(request: ParseRequest) -> ParsedMaterialV1:
     )
 
 
+def _configure_child_environment(temp_dir: str) -> None:
+    os.chdir(temp_dir)
+    tempfile.tempdir = temp_dir
+    for name in ("TMP", "TEMP", "TMPDIR"):
+        os.environ[name] = temp_dir
+
+
 def _child_entry(connection: Any, payload: dict[str, Any], temp_dir: str) -> None:
-    del temp_dir
     try:
+        _configure_child_environment(temp_dir)
         _apply_posix_limits(payload)
         parsed = _parse(ParseRequest.from_payload(payload))
         envelope = {"ok": True, "result": parsed.model_dump(mode="json")}
@@ -87,6 +97,21 @@ class ParserWorker:
         self._temp_root = self._paths.resolve(".parser-tmp")
         self._temp_root.mkdir(exist_ok=True)
         self._paths.verify(self._temp_root)
+        self._active: dict[str, multiprocessing.Process] = {}
+        self._active_lock = threading.Lock()
+
+    @property
+    def active_material_ids(self) -> tuple[str, ...]:
+        with self._active_lock:
+            return tuple(sorted(self._active))
+
+    def cancel(self, material_id: str) -> bool:
+        with self._active_lock:
+            process = self._active.get(material_id)
+        if process is None:
+            return False
+        self._stop(process)
+        return True
 
     def parse(self, request: ParseRequest) -> ParsedMaterialV1:
         source = self._paths.verify(Path(request.source_path), must_exist=True)
@@ -108,8 +133,24 @@ class ParserWorker:
         timeout = float(request.limits["parser_timeout_seconds"])
         try:
             process.start()
+            with self._active_lock:
+                self._active[request.material_id] = process
             child.close()
-            if not parent.poll(timeout):
+            deadline = time.monotonic() + timeout
+            has_result = False
+            while True:
+                try:
+                    has_result = parent.poll(
+                        min(0.05, max(0.0, deadline - time.monotonic()))
+                    )
+                except OSError:
+                    has_result = False
+                    break
+                if has_result:
+                    break
+                if not process.is_alive() or time.monotonic() >= deadline:
+                    break
+            if not has_result:
                 if process.is_alive():
                     self._stop(process)
                     raise ParserFailure(
@@ -140,6 +181,9 @@ class ParserWorker:
                 self._stop(process)
             return self._decode(raw)
         finally:
+            with self._active_lock:
+                if self._active.get(request.material_id) is process:
+                    self._active.pop(request.material_id, None)
             parent.close()
             if process.is_alive():
                 self._stop(process)

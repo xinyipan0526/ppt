@@ -3,7 +3,7 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from ppt_agent.api.security import InputLimits
 from ppt_agent.artifacts.store import ArtifactStore, CreateArtifact
@@ -19,7 +19,7 @@ from ppt_agent.storage.database import (
     create_sqlite_engine,
     session_scope,
 )
-from ppt_agent.storage.models import ArtifactEdgeRecord, Base
+from ppt_agent.storage.models import ArtifactEdgeRecord, ArtifactRecord, Base
 
 
 async def chunks(*values: bytes):
@@ -103,6 +103,64 @@ def test_upload_rejects_empty_and_oversized_sources(tmp_path: Path) -> None:
             assert store.list_project(project_id) == ()
         finally:
             engine.dispose()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    ("payload", "expected_type"),
+    [
+        (b"%PDF-1.7\n", "application/pdf"),
+        (b"\x89PNG\r\n\x1a\nbody", "image/png"),
+        (b"\xff\xd8\xffbody", "image/jpeg"),
+        (b"RIFF\x04\x00\x00\x00WEBPbody", "image/webp"),
+    ],
+)
+def test_upload_sniffs_binary_signatures_split_across_one_byte_chunks(
+    tmp_path: Path, payload: bytes, expected_type: str
+) -> None:
+    async def scenario() -> None:
+        service, _store, _artifacts, _sessions, engine, project_id = environment(tmp_path)
+        try:
+            material = await service.upload(
+                project_id=project_id, display_name="source.bin",
+                declared_type="text/markdown",
+                chunks=chunks(*(bytes([value]) for value in payload)),
+            )
+            assert material.media_type == expected_type
+        finally:
+            engine.dispose()
+
+    asyncio.run(scenario())
+
+
+def test_quota_rejection_does_not_leave_available_unreferenced_source(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        limits = InputLimits(max_file_bytes=10, max_project_upload_bytes=10)
+        service, _store, _artifacts, sessions, engine, project_id = environment(
+            tmp_path, limits=limits
+        )
+        try:
+            await service.upload(
+                project_id=project_id, display_name="first.md", declared_type=None,
+                chunks=chunks(b"12345678"),
+            )
+            with pytest.raises(MaterialServiceError) as caught:
+                await service.upload(
+                    project_id=project_id, display_name="second.md", declared_type=None,
+                    chunks=chunks(b"abcd"),
+                )
+            with session_scope(sessions) as session:
+                available = session.scalar(
+                    select(func.count()).select_from(ArtifactRecord).where(
+                        ArtifactRecord.kind == "source_material",
+                        ArtifactRecord.status == ArtifactStatus.AVAILABLE,
+                    )
+                )
+        finally:
+            engine.dispose()
+        assert caught.value.code is MaterialErrorCode.PROJECT_UPLOAD_LIMIT
+        assert available == 1
 
     asyncio.run(scenario())
 

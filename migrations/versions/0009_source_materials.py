@@ -50,7 +50,12 @@ def upgrade() -> None:
         sa.Column("source_bytes", sa.Integer(), nullable=False),
         sa.Column(
             "error_code",
-            sa.Enum(*MATERIAL_ERRORS, name="material_error_code", native_enum=False),
+            sa.Enum(
+                *MATERIAL_ERRORS,
+                name="material_error_code",
+                native_enum=False,
+                create_constraint=True,
+            ),
         ),
         sa.Column("error_detail", sa.String(500)),
         sa.Column("attempt_count", sa.Integer(), nullable=False, server_default="0"),

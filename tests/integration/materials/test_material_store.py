@@ -3,6 +3,7 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
+from sqlalchemy import select
 
 from ppt_agent.artifacts.store import ArtifactStore, CreateArtifact, EdgeInput
 from ppt_agent.domain.artifacts import ArtifactEdgeType
@@ -17,8 +18,9 @@ from ppt_agent.storage.database import (
     DatabaseConfig,
     create_session_factory,
     create_sqlite_engine,
+    session_scope,
 )
-from ppt_agent.storage.models import Base
+from ppt_agent.storage.models import ArtifactReferenceRecord, Base
 
 
 def environment(tmp_path: Path, *, quota: int = 100):
@@ -178,6 +180,55 @@ def test_reconcile_marks_interrupted_and_missing_results_failed(tmp_path: Path) 
         assert store.get(first.id).error_code is MaterialErrorCode.PARSER_INTERRUPTED
     finally:
         engine.dispose()
+
+
+def test_reconcile_stale_parsed_result_can_retry_to_new_result(tmp_path: Path) -> None:
+    store, artifacts, sessions, engine, project_id = environment(tmp_path)
+    try:
+        uploaded = create_material(store, artifacts, project_id)
+        claimed = store.claim(uploaded.id)
+
+        def parsed_artifact(logical_id: str) -> str:
+            staged = artifacts.create_staging(
+                CreateArtifact(
+                    project_id=project_id, logical_id=logical_id,
+                    kind="parsed_material", media_type="application/json",
+                    extension=".json", spec_fingerprint=str(uuid4()), metadata={},
+                )
+            )
+            artifacts.write_staging(staged.id, [b"{}"])
+            artifacts.commit_file(staged.id)
+            artifacts.commit_metadata(staged.id)
+            return artifacts.make_available(staged.id).id
+
+        first_id = parsed_artifact(f"parsed-material:{uploaded.id}:1")
+        store.complete(
+            uploaded.id, expected_version=claimed.version, parsed_artifact_id=first_id
+        )
+        artifacts.mark_stale(first_id)
+        store.reconcile()
+        failed = store.get(uploaded.id)
+        retried = store.retry(uploaded.id, expected_version=failed.version)
+        second_id = parsed_artifact(f"parsed-material:{uploaded.id}:2")
+        recovered = store.complete(
+            uploaded.id, expected_version=retried.version, parsed_artifact_id=second_id
+        )
+        with session_scope(sessions) as session:
+            references = list(
+                session.scalars(
+                    select(ArtifactReferenceRecord).where(
+                        ArtifactReferenceRecord.owner_id == uploaded.id,
+                        ArtifactReferenceRecord.role == "parsed",
+                    )
+                )
+            )
+    finally:
+        engine.dispose()
+
+    assert recovered.status is MaterialStatus.READY
+    assert recovered.parsed_artifact_id == second_id
+    assert len(references) == 1
+    assert references[0].artifact_id == second_id
 
 
 def test_project_quota_is_atomic_under_concurrent_finalize(tmp_path: Path) -> None:

@@ -8,7 +8,7 @@ import pytest
 from sqlalchemy import func, select
 
 from ppt_agent.artifacts.store import ArtifactStore, CreateArtifact
-from ppt_agent.domain.artifacts import ArtifactStatus
+from ppt_agent.domain.artifacts import ArtifactEdgeType, ArtifactStatus
 from ppt_agent.domain.contracts import (
     BriefDecision,
     DeckOutline,
@@ -30,6 +30,7 @@ from ppt_agent.storage.database import (
 )
 from ppt_agent.storage.models import (
     ArtifactRecord,
+    ArtifactEdgeRecord,
     Base,
     InterruptStatus,
     PlanningInputRecord,
@@ -296,6 +297,45 @@ def pending_interrupt(sessions, run_id: str):
                 WorkflowInterruptRecord.status == InterruptStatus.PENDING,
             )
         )
+
+
+def test_brief_records_parsed_material_provenance() -> None:
+    engine, sessions, store, workflow, _runner, project_id = setup_workflow(
+        planning_outputs()
+    )
+    staged = workflow.artifacts.create_staging(
+        CreateArtifact(
+            project_id=project_id, logical_id="parsed:source", kind="parsed_material",
+            media_type="application/json", extension=".json",
+            spec_fingerprint="parsed:source", metadata={},
+        )
+    )
+    workflow.artifacts.write_staging(staged.id, [b"{}"])
+    workflow.artifacts.commit_file(staged.id)
+    workflow.artifacts.commit_metadata(staged.id)
+    source = workflow.artifacts.make_available(staged.id)
+    try:
+        run = asyncio.run(
+            workflow.create_run(
+                project_id=project_id,
+                normalized_text="source",
+                source_refs=(source.id,),
+                validate_source_refs=True,
+            )
+        )
+        asyncio.run(workflow.execute(run.id))
+        brief_id = store.stage_output_refs(run.id, "build_brief")[0]
+        with session_scope(sessions) as session:
+            edge = session.scalar(
+                select(ArtifactEdgeRecord).where(
+                    ArtifactEdgeRecord.source_artifact_id == source.id,
+                    ArtifactEdgeRecord.target_artifact_id == brief_id,
+                )
+            )
+    finally:
+        engine.dispose()
+    assert edge is not None
+    assert edge.edge_type is ArtifactEdgeType.DERIVED_FROM
 
 
 def test_complete_workflow_persists_artifacts_and_requires_approval() -> None:

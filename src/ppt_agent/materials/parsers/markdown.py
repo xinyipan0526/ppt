@@ -86,6 +86,7 @@ def parse_markdown(request: ParseRequest) -> ParsedMaterialV1:
         material_id=request.material_id,
         media_type="text/markdown",
         source_artifact_id=request.source_artifact_id,
+        untrusted_source_content=True,
         text_blocks=tuple(blocks),
         external_references=tuple(references),
         warnings=tuple(warnings),

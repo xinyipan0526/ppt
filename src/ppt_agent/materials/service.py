@@ -65,8 +65,6 @@ class MaterialService:
                 raise TypeError("upload chunks must be bytes")
             prefix.append(chunk)
             head.extend(chunk[: max(0, 65_536 - len(head))])
-            if chunk:
-                break
         if not head:
             raise MaterialServiceError(MaterialErrorCode.EMPTY_UPLOAD, "upload is empty")
         try:
@@ -76,6 +74,14 @@ class MaterialService:
         except ParserFailure as exc:
             raise MaterialServiceError(exc.code, exc.safe_detail) from exc
         material_id = str(uuid4())
+        remaining = await asyncio.to_thread(
+            self.store.remaining_upload_bytes, project_id
+        )
+        if remaining <= 0:
+            raise MaterialServiceError(
+                MaterialErrorCode.PROJECT_UPLOAD_LIMIT,
+                "project upload byte limit exceeded",
+            )
         safe_name = sanitize_display_name(display_name)
         staged = self.artifacts.create_staging(
             CreateArtifact(
@@ -97,12 +103,26 @@ class MaterialService:
 
         try:
             written = await self.artifacts.write_staging_async(
-                staged.id, replay(), max_bytes=self.limits.max_file_bytes
+                staged.id,
+                replay(),
+                max_bytes=min(self.limits.max_file_bytes, remaining),
             )
         except ValueError as exc:
+            await asyncio.to_thread(self.artifacts.discard_staging, staged.id)
+            code = (
+                MaterialErrorCode.PROJECT_UPLOAD_LIMIT
+                if remaining < self.limits.max_file_bytes
+                else MaterialErrorCode.FILE_TOO_LARGE
+            )
             raise MaterialServiceError(
-                MaterialErrorCode.FILE_TOO_LARGE, "upload exceeds the single-file byte limit"
+                code,
+                "project upload byte limit exceeded"
+                if code is MaterialErrorCode.PROJECT_UPLOAD_LIMIT
+                else "upload exceeds the single-file byte limit",
             ) from exc
+        except BaseException:
+            await asyncio.to_thread(self.artifacts.discard_staging, staged.id)
+            raise
         if not written.size_bytes:
             raise MaterialServiceError(MaterialErrorCode.EMPTY_UPLOAD, "upload is empty")
         await asyncio.to_thread(self.artifacts.commit_file, staged.id)
@@ -126,6 +146,7 @@ class MaterialService:
             from ppt_agent.materials.store import MaterialQuotaExceeded
 
             if isinstance(exc, MaterialQuotaExceeded):
+                await asyncio.to_thread(self.artifacts.mark_stale, source.id)
                 raise MaterialServiceError(
                     MaterialErrorCode.PROJECT_UPLOAD_LIMIT,
                     "project upload byte limit exceeded",
@@ -150,7 +171,19 @@ class MaterialService:
             limits=dict(claimed.limits),
         )
         try:
-            parsed = await asyncio.to_thread(self.worker.parse, request)
+            worker_task = asyncio.create_task(
+                asyncio.to_thread(self.worker.parse, request),
+                name=f"parser-worker:{claimed.id}",
+            )
+            try:
+                parsed = await asyncio.shield(worker_task)
+            except asyncio.CancelledError:
+                await asyncio.to_thread(self.worker.cancel, claimed.id)
+                try:
+                    await worker_task
+                except ParserFailure:
+                    pass
+                raise
             payload = parsed.model_dump_json(exclude_none=True).encode("utf-8")
             source = await asyncio.to_thread(self.artifacts.get, claimed.source_artifact_id)
             fingerprint_payload = {

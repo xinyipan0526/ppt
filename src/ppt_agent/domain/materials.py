@@ -96,7 +96,7 @@ class ParsedMaterialV1(MaterialContract):
         "text/markdown", "application/pdf", "image/png", "image/jpeg", "image/webp"
     ]
     source_artifact_id: str = Field(min_length=1, max_length=100)
-    untrusted_source_content: Literal[True] = True
+    untrusted_source_content: Literal[True]
     text_blocks: tuple[TextBlockV1, ...] = Field(default=(), max_length=200_000)
     metadata: DocumentMetadataV1 = Field(default_factory=DocumentMetadataV1)
     external_references: tuple[ExternalReferenceV1, ...] = Field(

@@ -43,6 +43,20 @@ def test_image_parser_enforces_pixel_and_compression_limits(tmp_path: Path) -> N
     assert caught.value.code is MaterialErrorCode.IMAGE_COMPRESSION_LIMIT
 
 
+def test_image_parser_enforces_dimensions_and_decoded_byte_limit(tmp_path: Path) -> None:
+    path = tmp_path / "bounded.png"
+    Image.new("RGB", (20, 10), "blue").save(path)
+    with pytest.raises(ParserFailure) as caught:
+        parse_image(request(path, limits=replace(InputLimits(), max_image_width=19)))
+    assert caught.value.code is MaterialErrorCode.IMAGE_PIXEL_LIMIT
+
+    with pytest.raises(ParserFailure) as caught:
+        parse_image(
+            request(path, limits=replace(InputLimits(), max_decoded_image_bytes=599))
+        )
+    assert caught.value.code is MaterialErrorCode.IMAGE_PIXEL_LIMIT
+
+
 def test_image_parser_rejects_animated_and_truncated_images(tmp_path: Path) -> None:
     animated = tmp_path / "animated.webp"
     frames = [Image.new("RGB", (4, 4), color) for color in ("red", "blue")]

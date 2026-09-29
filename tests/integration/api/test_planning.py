@@ -45,13 +45,15 @@ class APIWorkflow:
         self.before_create = None
 
     async def create_run(
-        self, *, project_id, normalized_text, source_refs=(), validate_source_refs=False
+        self, *, project_id, normalized_text, source_refs=(), validate_source_refs=False,
+        source_material_refs=(),
     ):
         if self.before_create is not None:
             self.before_create()
         return self.store.create_run(
             project_id, source_refs, normalized_text,
             validate_source_refs=validate_source_refs,
+            source_material_refs=source_material_refs,
         )
 
 
@@ -242,7 +244,7 @@ def test_planning_projection_exposes_only_durable_refs_and_status() -> None:
     assert "response" not in response.text
 
 
-def setup_material_planning_api(tmp_path: Path):
+def setup_material_planning_api(tmp_path: Path, *, limits: InputLimits | None = None):
     workspace = tmp_path / "workspace"
     engine = create_sqlite_engine(DatabaseConfig(path=tmp_path / "state.db"))
     Base.metadata.create_all(engine)
@@ -261,7 +263,9 @@ def setup_material_planning_api(tmp_path: Path):
     planning_supervisor = RecordingSupervisor()
     material_supervisor = RecordingSupervisor()
     artifacts = ArtifactStore(sessions, workspace)
-    limits = InputLimits(max_file_bytes=100_000, max_project_upload_bytes=1_000_000)
+    limits = limits or InputLimits(
+        max_file_bytes=100_000, max_project_upload_bytes=1_000_000
+    )
     material_store = MaterialStore(
         sessions, artifacts, max_project_bytes=limits.max_project_upload_bytes
     )
@@ -339,6 +343,7 @@ def ready_material(
     parsed = ParsedMaterialV1(
         material_id=material.id, media_type="text/markdown",
         source_artifact_id=source.id,
+        untrusted_source_content=True,
         text_blocks=(
             TextBlockV1(
                 id=build_text_block_id(material.id, locator, text),
@@ -483,3 +488,48 @@ def test_planning_rechecks_artifact_availability_in_creation_boundary(tmp_path: 
         engine.dispose()
     assert response.status_code == 409
     assert count == 0
+
+
+def test_planning_rechecks_material_ready_linkage_in_creation_boundary(tmp_path: Path) -> None:
+    (
+        engine, app, planning_store, workflow, _supervisor,
+        material_store, artifacts, project_id, _other,
+    ) = setup_material_planning_api(tmp_path)
+    material, _parsed = ready_material(material_store, artifacts, project_id, "Delete race")
+    workflow.before_create = lambda: material_store.delete(
+        material.id, expected_version=material.version
+    )
+    try:
+        response = request(
+            app, "POST", f"/api/v1/projects/{project_id}/planning-runs",
+            headers=VALID_HEADERS, json={"material_ids": [material.id]},
+        )
+        with session_scope(planning_store._sessions) as session:
+            count = session.scalar(select(func.count()).select_from(PlanningInputRecord))
+    finally:
+        engine.dispose()
+    assert response.status_code == 409
+    assert count == 0
+
+
+def test_planning_rejects_aggregate_material_context_over_limit(tmp_path: Path) -> None:
+    limits = InputLimits(
+        max_file_bytes=100_000,
+        max_project_upload_bytes=1_000_000,
+        max_planning_source_bytes=120,
+    )
+    (
+        engine, app, _store, _workflow, _supervisor,
+        material_store, artifacts, project_id, _other,
+    ) = setup_material_planning_api(tmp_path, limits=limits)
+    material, _parsed = ready_material(
+        material_store, artifacts, project_id, "x" * 100
+    )
+    try:
+        response = request(
+            app, "POST", f"/api/v1/projects/{project_id}/planning-runs",
+            headers=VALID_HEADERS, json={"material_ids": [material.id]},
+        )
+    finally:
+        engine.dispose()
+    assert response.status_code == 413
