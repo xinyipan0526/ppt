@@ -62,6 +62,7 @@ def test_initial_migration_creates_workflow_runtime_tables() -> None:
         "artifact_references",
         "artifact_orphans",
         "planning_inputs",
+        "source_materials",
     }
     assert set(Base.metadata.tables) == tables - {"alembic_version"}
     assert {tuple(item["column_names"]) for item in reservation_uniques} == {
@@ -96,6 +97,16 @@ def test_initial_migration_creates_workflow_runtime_tables() -> None:
     assert {tuple(item["column_names"]) for item in planning_uniques} == {
         ("run_id", "generation")
     }
+    artifact_uniques = inspector.get_unique_constraints("artifacts")
+    assert ("id", "project_id") in {
+        tuple(item["column_names"]) for item in artifact_uniques
+    }
+    material_foreign_keys = inspector.get_foreign_keys("source_materials")
+    assert sum(
+        foreign_key["referred_table"] == "artifacts"
+        and tuple(foreign_key["referred_columns"]) == ("id", "project_id")
+        for foreign_key in material_foreign_keys
+    ) == 2
 
 
 def test_event_sequence_is_unique_within_a_run() -> None:

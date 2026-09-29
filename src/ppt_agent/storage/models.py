@@ -10,6 +10,7 @@ from sqlalchemy import (
     DateTime,
     Enum,
     ForeignKey,
+    ForeignKeyConstraint,
     CheckConstraint,
     Index,
     Integer,
@@ -25,6 +26,7 @@ from ppt_agent.domain.events import EventDurability
 from ppt_agent.domain.state_machine import PageStatus, RunStatus, StepStatus
 from ppt_agent.domain.costs import ReservationStatus
 from ppt_agent.domain.providers import OperationAggregateStatus
+from ppt_agent.domain.materials import MaterialErrorCode, MaterialStatus
 from ppt_agent.domain.state_machine import AttemptStatus
 
 
@@ -421,6 +423,7 @@ class ArtifactRecord(TimestampMixin, Base):
         UniqueConstraint(
             "project_id", "logical_id", "version", name="uq_artifact_logical_version"
         ),
+        UniqueConstraint("id", "project_id", name="uq_artifact_id_project"),
         CheckConstraint(
             "size_bytes IS NULL OR size_bytes >= 0", name="ck_artifact_size_nonnegative"
         ),
@@ -451,6 +454,61 @@ class ArtifactRecord(TimestampMixin, Base):
     )
     retention_since: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     invalid_reason: Mapped[str | None] = mapped_column(String(255))
+
+
+class SourceMaterialRecord(TimestampMixin, Base):
+    __tablename__ = "source_materials"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["source_artifact_id", "project_id"],
+            ["artifacts.id", "artifacts.project_id"],
+            ondelete="RESTRICT",
+            name="fk_source_material_source_artifact_project",
+        ),
+        ForeignKeyConstraint(
+            ["parsed_artifact_id", "project_id"],
+            ["artifacts.id", "artifacts.project_id"],
+            ondelete="RESTRICT",
+            name="fk_source_material_parsed_artifact_project",
+        ),
+        CheckConstraint("source_bytes >= 0", name="ck_source_material_bytes_nonnegative"),
+        CheckConstraint("attempt_count >= 0", name="ck_source_material_attempt_nonnegative"),
+        CheckConstraint("version >= 1", name="ck_source_material_version_positive"),
+        CheckConstraint(
+            "(status = 'ready' AND parsed_artifact_id IS NOT NULL AND error_code IS NULL) "
+            "OR (status = 'failed' AND parsed_artifact_id IS NULL AND error_code IS NOT NULL) "
+            "OR (status IN ('uploaded', 'parsing', 'deleted') "
+            "AND parsed_artifact_id IS NULL AND error_code IS NULL)",
+            name="ck_source_material_state_payload",
+        ),
+        Index("ix_source_material_project_status", "project_id", "status"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    display_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    media_type: Mapped[str] = mapped_column(String(100), nullable=False)
+    source_artifact_id: Mapped[str] = mapped_column(String(36), nullable=False, unique=True)
+    parsed_artifact_id: Mapped[str | None] = mapped_column(String(36), unique=True)
+    status: Mapped[MaterialStatus] = mapped_column(
+        enum_type(MaterialStatus, "material_status"), nullable=False
+    )
+    parser_name: Mapped[str] = mapped_column(String(100), nullable=False)
+    parser_version: Mapped[str] = mapped_column(String(50), nullable=False)
+    limits_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    limits_fingerprint: Mapped[str] = mapped_column(String(100), nullable=False)
+    source_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
+    error_code: Mapped[MaterialErrorCode | None] = mapped_column(
+        enum_type(MaterialErrorCode, "material_error_code")
+    )
+    error_detail: Mapped[str | None] = mapped_column(String(500))
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.current_timestamp()
+    )
 
 
 class ArtifactEdgeRecord(TimestampMixin, Base):
