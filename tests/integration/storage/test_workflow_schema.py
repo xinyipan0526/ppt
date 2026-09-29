@@ -63,6 +63,15 @@ def test_initial_migration_creates_workflow_runtime_tables() -> None:
         "artifact_orphans",
         "planning_inputs",
         "source_materials",
+        "provider_binary_results",
+        "provider_vision_results",
+        "production_inputs",
+        "page_generations",
+        "quality_reports",
+        "exports",
+        "page_edits",
+        "material_attempts",
+        "provider_retry_schedules",
     }
     assert set(Base.metadata.tables) == tables - {"alembic_version"}
     assert {tuple(item["column_names"]) for item in reservation_uniques} == {

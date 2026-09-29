@@ -547,15 +547,19 @@ class ArtifactReferenceRecord(TimestampMixin, Base):
             "role",
             name="uq_artifact_reference_slot",
         ),
+        ForeignKeyConstraint(
+            ["artifact_id", "project_id"],
+            ["artifacts.id", "artifacts.project_id"],
+            ondelete="CASCADE",
+            name="fk_artifact_reference_artifact_project",
+        ),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
     project_id: Mapped[str] = mapped_column(
         ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True
     )
-    artifact_id: Mapped[str] = mapped_column(
-        ForeignKey("artifacts.id", ondelete="CASCADE"), nullable=False, index=True
-    )
+    artifact_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
     owner_type: Mapped[str] = mapped_column(String(50), nullable=False)
     owner_id: Mapped[str] = mapped_column(String(100), nullable=False)
     role: Mapped[str] = mapped_column(String(50), nullable=False)
@@ -569,3 +573,191 @@ class ArtifactOrphanRecord(TimestampMixin, Base):
     quarantine_path: Mapped[str] = mapped_column(String(500), nullable=False, unique=True)
     size_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
     content_hash: Mapped[str] = mapped_column(String(80), nullable=False)
+
+
+class ProviderBinaryResultRecord(TimestampMixin, Base):
+    __tablename__ = "provider_binary_results"
+
+    operation_id: Mapped[str] = mapped_column(
+        ForeignKey("provider_operations.id", ondelete="CASCADE"), primary_key=True
+    )
+    attempt_id: Mapped[str] = mapped_column(
+        ForeignKey("provider_attempts.id", ondelete="CASCADE"), nullable=False, unique=True
+    )
+    request_fingerprint: Mapped[str] = mapped_column(String(255), nullable=False)
+    result_kind: Mapped[str] = mapped_column(String(20), nullable=False)
+    result_value: Mapped[str] = mapped_column(Text, nullable=False)
+    media_type: Mapped[str] = mapped_column(String(100), nullable=False)
+    usage: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    download_status: Mapped[str] = mapped_column(String(30), nullable=False)
+    artifact_id: Mapped[str | None] = mapped_column(
+        ForeignKey("artifacts.id", ondelete="SET NULL"), index=True
+    )
+
+
+class ProviderVisionResultRecord(TimestampMixin, Base):
+    __tablename__ = "provider_vision_results"
+
+    operation_id: Mapped[str] = mapped_column(
+        ForeignKey("provider_operations.id", ondelete="CASCADE"), primary_key=True
+    )
+    attempt_id: Mapped[str] = mapped_column(
+        ForeignKey("provider_attempts.id", ondelete="CASCADE"), nullable=False, unique=True
+    )
+    request_fingerprint: Mapped[str] = mapped_column(String(255), nullable=False)
+    schema_name: Mapped[str] = mapped_column(String(100), nullable=False)
+    schema_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    output_payload: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    usage: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+
+
+class ProductionInputRecord(TimestampMixin, Base):
+    __tablename__ = "production_inputs"
+
+    run_id: Mapped[str] = mapped_column(
+        ForeignKey("workflow_runs.id", ondelete="CASCADE"), primary_key=True
+    )
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    planning_run_id: Mapped[str] = mapped_column(
+        ForeignKey("workflow_runs.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    planning_bundle_artifact_id: Mapped[str] = mapped_column(
+        ForeignKey("artifacts.id", ondelete="RESTRICT"), nullable=False
+    )
+    production_spec_artifact_id: Mapped[str] = mapped_column(
+        ForeignKey("artifacts.id", ondelete="RESTRICT"), nullable=False
+    )
+
+
+class PageGenerationRecord(TimestampMixin, Base):
+    __tablename__ = "page_generations"
+    __table_args__ = (
+        UniqueConstraint("page_id", "generation", name="uq_page_generation"),
+        CheckConstraint("generation >= 1", name="ck_page_generation_positive"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    page_id: Mapped[str] = mapped_column(
+        ForeignKey("pages.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    generation: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(String(30), nullable=False)
+    production_spec_artifact_id: Mapped[str] = mapped_column(
+        ForeignKey("artifacts.id", ondelete="RESTRICT"), nullable=False
+    )
+    visual_artifact_id: Mapped[str | None] = mapped_column(
+        ForeignKey("artifacts.id", ondelete="SET NULL")
+    )
+    render_manifest_artifact_id: Mapped[str | None] = mapped_column(
+        ForeignKey("artifacts.id", ondelete="SET NULL")
+    )
+    dom_report_artifact_id: Mapped[str | None] = mapped_column(
+        ForeignKey("artifacts.id", ondelete="SET NULL")
+    )
+    page_image_artifact_id: Mapped[str | None] = mapped_column(
+        ForeignKey("artifacts.id", ondelete="SET NULL")
+    )
+    quality_artifact_id: Mapped[str | None] = mapped_column(
+        ForeignKey("artifacts.id", ondelete="SET NULL")
+    )
+    source_generation_id: Mapped[str | None] = mapped_column(
+        ForeignKey("page_generations.id", ondelete="SET NULL")
+    )
+
+
+class QualityReportRecord(TimestampMixin, Base):
+    __tablename__ = "quality_reports"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    page_generation_id: Mapped[str] = mapped_column(
+        ForeignKey("page_generations.id", ondelete="CASCADE"), nullable=False, unique=True
+    )
+    artifact_id: Mapped[str] = mapped_column(
+        ForeignKey("artifacts.id", ondelete="RESTRICT"), nullable=False, unique=True
+    )
+    passed: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    issue_summary: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+
+
+class ExportRecord(TimestampMixin, Base):
+    __tablename__ = "exports"
+    __table_args__ = (
+        UniqueConstraint("project_id", "manifest_fingerprint", name="uq_export_manifest"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    run_id: Mapped[str] = mapped_column(
+        ForeignKey("workflow_runs.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    format: Mapped[str] = mapped_column(String(20), nullable=False)
+    status: Mapped[str] = mapped_column(String(30), nullable=False)
+    manifest_fingerprint: Mapped[str] = mapped_column(String(255), nullable=False)
+    manifest: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    artifact_id: Mapped[str | None] = mapped_column(
+        ForeignKey("artifacts.id", ondelete="SET NULL")
+    )
+    forced: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    risk_acknowledgement: Mapped[str | None] = mapped_column(String(1000))
+    error: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+
+
+class PageEditRecord(TimestampMixin, Base):
+    __tablename__ = "page_edits"
+    __table_args__ = (
+        UniqueConstraint("page_id", "idempotency_key", name="uq_page_edit_idempotency"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    page_id: Mapped[str] = mapped_column(
+        ForeignKey("pages.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    source_generation_id: Mapped[str] = mapped_column(
+        ForeignKey("page_generations.id", ondelete="RESTRICT"), nullable=False
+    )
+    result_generation_id: Mapped[str | None] = mapped_column(
+        ForeignKey("page_generations.id", ondelete="SET NULL")
+    )
+    idempotency_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    request_payload: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    plan_payload: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    status: Mapped[str] = mapped_column(String(30), nullable=False)
+
+
+class MaterialAttemptRecord(TimestampMixin, Base):
+    __tablename__ = "material_attempts"
+    __table_args__ = (
+        UniqueConstraint("material_id", "attempt_no", name="uq_material_attempt_number"),
+        CheckConstraint("attempt_no >= 1", name="ck_material_attempt_positive"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    material_id: Mapped[str] = mapped_column(
+        ForeignKey("source_materials.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    attempt_no: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(String(30), nullable=False)
+    error_code: Mapped[str | None] = mapped_column(String(100))
+    error_detail: Mapped[str | None] = mapped_column(String(500))
+    parsed_artifact_id: Mapped[str | None] = mapped_column(
+        ForeignKey("artifacts.id", ondelete="SET NULL")
+    )
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class ProviderRetryScheduleRecord(TimestampMixin, Base):
+    __tablename__ = "provider_retry_schedules"
+
+    operation_id: Mapped[str] = mapped_column(
+        ForeignKey("provider_operations.id", ondelete="CASCADE"), primary_key=True
+    )
+    attempt_id: Mapped[str] = mapped_column(
+        ForeignKey("provider_attempts.id", ondelete="CASCADE"), nullable=False, unique=True
+    )
+    due_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    reason: Mapped[str] = mapped_column(String(100), nullable=False)
+    consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
