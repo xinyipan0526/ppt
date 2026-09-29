@@ -117,10 +117,12 @@ git status --short
 | `4b72261` | Source Material 领域契约、迁移、状态持久化与原子项目配额 |
 | `569d2d0` | Markdown、PDF、图片解析器与有界子进程隔离 |
 | `7e7f171` | Artifact-first 素材服务、调度器、恢复、HTTP API 与 Runtime 组合 |
+| `7374213` | 素材解析结果可信边界编译、规划 Run 事务内复核与来源接线 |
+| `bdba6e8` | 独立审查修复：恢复引用、上传清理、解析资源上限、子进程取消、规划竞态与来源依赖 |
 
 截至当前基础设施里程碑：
 
-- 全量测试为 `294 passed, 3 skipped`；两项跳过来自当前 Windows 账户无法创建符号链接，一项为默认关闭的真实 DeepSeek 计费测试。
+- 全量测试为 `306 passed, 3 skipped`；两项跳过来自当前 Windows 账户无法创建符号链接，一项为默认关闭的真实 DeepSeek 计费测试。
 - 事件序号通过 Run 行上的原子 `UPDATE ... RETURNING` 分配。
 - 状态变化与核心事件在同一事务提交。
 - SSE 支持一致快照、`Last-Event-ID`、游标过期和有界批量读取。
@@ -146,6 +148,8 @@ git status --short
 - Markdown、PDF、PNG/JPEG/WebP 使用内容优先识别和严格限制解析；Pillow 与 pypdf 运行在 spawn 子进程中，父进程执行超时、IPC 大小和结果 Schema 复核。Windows 当前只具备进程隔离与超时终止，无法提供 POSIX `rlimit` 的同等级资源约束。
 - 素材上传、查询、重试和删除 API 已接入认证、项目授权、流式字节上限与全局/项目解析并发边界；项目累计上传配额在 SQLite `BEGIN IMMEDIATE` 事务内复核。
 - 规划创建 API 只接受用户文本和 `material_ids`，不接受客户端伪造的 Artifact 引用；解析块以规范 JSON 的 `untrusted_source_content` 边界编译，并在创建 Run 的同一写事务中复核 parsed Artifact 的项目、类型和可用状态。
+- 独立审查后，素材恢复会原子替换过期 parsed 引用；上传执行项目剩余额度预检和竞态失败清理；二进制签名可跨任意 HTTP 分片识别；图片增加宽高、解码字节与逐帧解码上限；关机取消会终止并 join 解析子进程。
+- 规划 Context 设有聚合 UTF-8 字节上限，并在 Run 创建事务中同时复核 Material `ready` 状态与 parsed Artifact 绑定；Brief Artifact 通过依赖边追溯并保护输入素材。
 
 ## 6. 下一步
 
@@ -169,6 +173,7 @@ git status --short
 - 当前默认导出的 `app` 仍只提供未配置的应用骨架；实际规划路由通过 `create_app` 显式注入 Runtime、Workflow、Supervisor、认证和资源授权。面向最终用户的环境变量/配置文件启动器应与下一阶段应用配置一起实现。
 - Provider 的 `retryable` 目前只用于能力映射，不自动定时重试；这是为了避免在尚无持久化计时调度器时产生隐式重复费用。已知失败由用户显式重试，计费不确定失败必须先完成恢复或风险确认。
 - 意图是否需要澄清仍由受 Schema 约束的 Brief 决策模型判断；不可信输入边界已改为 JSON 字符串编码并转义闭合标记，但尚未增加领域专用的确定性“信息充分度”规则。
+- Material 当前状态只保存最近一次错误；显式重试会清空该字段。若产品需要展示完整解析尝试历史，应新增版本化 Material Attempt/Event 表，而不是把历史错误塞回当前状态行。
 
 这些待办不能因上下文清理而丢失，也不应在无关模块中顺手实现。
 
