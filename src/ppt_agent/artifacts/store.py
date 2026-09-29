@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import hashlib
+import asyncio
 import os
 import re
 from collections import deque
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import AsyncIterable, Callable, Iterable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -213,6 +214,63 @@ class ArtifactStore:
                 expected_hash=expected_hash,
                 durable=durable,
             )
+
+    async def write_staging_async(
+        self,
+        artifact_id: str,
+        chunks: AsyncIterable[bytes],
+        *,
+        max_bytes: int,
+        durable: bool = True,
+    ) -> ArtifactSnapshot:
+        """Stream an async request body into staging without buffering it."""
+
+        if max_bytes <= 0:
+            raise ValueError("max_bytes must be positive")
+        with self._artifact_lock(artifact_id):
+            snapshot = self.get(artifact_id)
+            if snapshot.status is not ArtifactStatus.STAGING or snapshot.content_hash:
+                raise ArtifactConflict("artifact is not an empty staging record")
+            staging = self._resolve(snapshot.staging_path)
+            digest = hashlib.sha256()
+            size = 0
+            try:
+                with staging.open("wb") as output:
+                    async for chunk in chunks:
+                        if not isinstance(chunk, bytes):
+                            raise TypeError("artifact chunks must be bytes")
+                        if size + len(chunk) > max_bytes:
+                            raise ValueError("artifact byte limit exceeded")
+                        if chunk:
+                            await asyncio.to_thread(output.write, chunk)
+                            digest.update(chunk)
+                            size += len(chunk)
+                    await asyncio.to_thread(output.flush)
+                    if durable:
+                        await asyncio.to_thread(os.fsync, output.fileno())
+                self._verify(staging)
+                content_hash = f"sha256:{digest.hexdigest()}"
+                if self._file_validator is not None:
+                    await asyncio.to_thread(self._file_validator, staging, snapshot)
+                relative = (
+                    f"artifacts/{digest.hexdigest()[:2]}/"
+                    f"{digest.hexdigest()}{snapshot.extension}"
+                )
+                with session_scope(self._sessions) as session:
+                    record = self._require(session, artifact_id)
+                    if record.status is not ArtifactStatus.STAGING or record.content_hash:
+                        raise ArtifactConflict("artifact staging state changed while writing")
+                    record.content_hash = content_hash
+                    record.size_bytes = size
+                    record.relative_path = relative
+                    session.flush()
+                    return self._snapshot(record)
+            except BaseException:
+                try:
+                    self._safe_unlink(staging)
+                except ArtifactIntegrityError:
+                    pass
+                raise
 
     def _write_staging_unlocked(
         self,
@@ -428,6 +486,24 @@ class ArtifactStore:
         if snapshot.content_hash and self._hash_file(path) != snapshot.content_hash:
             raise ArtifactIntegrityError("artifact content hash does not match metadata")
         return path.read_bytes()
+
+    def path_for(self, artifact_id: str) -> Path:
+        """Return a canonical read-only path for a committed Artifact."""
+
+        snapshot = self.get(artifact_id)
+        if snapshot.status not in {
+            ArtifactStatus.AVAILABLE,
+            ArtifactStatus.STALE,
+            ArtifactStatus.SUPERSEDED,
+        }:
+            raise ArtifactConflict("artifact is not readable")
+        if not snapshot.relative_path:
+            raise ArtifactIntegrityError("artifact has no committed path")
+        path = self._resolve(snapshot.relative_path, must_exist=True)
+        self._verify(path)
+        if not path.is_file():
+            raise ArtifactIntegrityError("artifact file is missing")
+        return path
 
     def find_cache_hit(
         self, project_id: str, kind: str, spec_fingerprint: str

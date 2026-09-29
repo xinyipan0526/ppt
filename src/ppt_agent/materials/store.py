@@ -256,6 +256,19 @@ class MaterialStore:
             )
             return tuple(self._snapshot(record) for record in records)
 
+    def list_pending(self) -> tuple[MaterialSnapshot, ...]:
+        with session_scope(self._sessions) as session:
+            records = session.scalars(
+                select(SourceMaterialRecord)
+                .where(
+                    SourceMaterialRecord.status.in_(
+                        {MaterialStatus.UPLOADED, MaterialStatus.PARSING}
+                    )
+                )
+                .order_by(SourceMaterialRecord.created_at, SourceMaterialRecord.id)
+            )
+            return tuple(self._snapshot(record) for record in records)
+
     def resolve_ready(
         self, project_id: str, material_ids: tuple[str, ...]
     ) -> tuple[ResolvedMaterial, ...]:

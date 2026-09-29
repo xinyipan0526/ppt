@@ -62,6 +62,17 @@ PlanningWorkflowFactory = Callable[
 ]
 
 
+class MaterialRuntimeComponent:
+    async def start(self) -> None: ...
+
+    async def stop(self, *, timeout: float) -> tuple[str, ...]: ...
+
+
+MaterialRuntimeFactory = Callable[
+    [SessionFactory, ArtifactStore], MaterialRuntimeComponent
+]
+
+
 class ApplicationRuntime:
     """Own all process-lifetime resources and expose readiness explicitly."""
 
@@ -74,6 +85,7 @@ class ApplicationRuntime:
         filesystem_classifier: FilesystemClassifier | None = None,
         migration_runner: Callable[[Path], None] = run_migrations,
         cancellation_executor: RunExecutor | None = None,
+        material_runtime_factory: MaterialRuntimeFactory | None = None,
     ) -> None:
         if (executor is None) == (planning_workflow_factory is None):
             raise ValueError(
@@ -85,6 +97,7 @@ class ApplicationRuntime:
         self._classifier = filesystem_classifier
         self._migration_runner = migration_runner
         self._cancellation_executor = cancellation_executor
+        self._material_runtime_factory = material_runtime_factory
         self.capabilities: WorkspaceCapabilities | None = None
         self.engine: Engine | None = None
         self.repository: WorkflowRepository | None = None
@@ -92,6 +105,7 @@ class ApplicationRuntime:
         self.artifacts: ArtifactStore | None = None
         self.supervisor: TaskSupervisor | None = None
         self.planning_workflow: PlanningWorkflowExecutor | None = None
+        self.material_runtime: MaterialRuntimeComponent | None = None
         self.recovery_plan: RecoveryPlan | None = None
         self.reconciliation_report: ReconciliationReport | None = None
         self._lock: WorkspaceInstanceLock | None = None
@@ -130,6 +144,11 @@ class ApplicationRuntime:
             self.reconciliation_report = await asyncio.to_thread(
                 self.artifacts.reconcile
             )
+            if self._material_runtime_factory is not None:
+                self.material_runtime = self._material_runtime_factory(
+                    sessions, self.artifacts
+                )
+                await self.material_runtime.start()
             self.repository = WorkflowRepository(sessions)
             self.event_store = WorkflowEventStore(sessions)
             self.recovery_plan = await asyncio.to_thread(
@@ -202,6 +221,16 @@ class ApplicationRuntime:
                 failure = failure or exc
             finally:
                 self.supervisor = None
+        if self.material_runtime is not None:
+            try:
+                material_interrupted = await self.material_runtime.stop(
+                    timeout=self.config.shutdown_timeout
+                )
+                interrupted = tuple(sorted({*interrupted, *material_interrupted}))
+            except BaseException as exc:
+                failure = failure or exc
+            finally:
+                self.material_runtime = None
         self.planning_workflow = None
         if self.engine is not None:
             try:

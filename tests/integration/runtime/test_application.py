@@ -175,3 +175,45 @@ def test_runtime_can_compose_supervisor_from_planning_workflow_factory() -> None
         assert runtime.planning_workflow is None
 
     asyncio.run(scenario())
+
+
+def test_runtime_starts_material_component_after_artifact_reconciliation() -> None:
+    async def scenario() -> None:
+        calls: list[str] = []
+
+        class MaterialRuntime:
+            async def start(self) -> None:
+                assert runtime.reconciliation_report is not None
+                assert runtime.recovery_plan is None
+                calls.append("material_start")
+
+            async def stop(self, *, timeout: float) -> tuple[str, ...]:
+                calls.append(f"material_stop:{timeout}")
+                return ()
+
+        component = MaterialRuntime()
+
+        def build_materials(_sessions, _artifacts):
+            calls.append("material_build")
+            return component
+
+        async def execute(_run_id: str) -> None:
+            return None
+
+        runtime = ApplicationRuntime(
+            ApplicationRuntimeConfig(
+                workspace=workspace_path(), minimum_free_bytes=0,
+                shutdown_timeout=2, maintenance_interval=60,
+            ),
+            execute,
+            material_runtime_factory=build_materials,
+            filesystem_classifier=lambda _path: FilesystemKind.LOCAL,
+        )
+        await runtime.start()
+        assert runtime.material_runtime is component
+        assert runtime.recovery_plan is not None
+        await runtime.stop()
+        assert calls == ["material_build", "material_start", "material_stop:2"]
+        assert runtime.material_runtime is None
+
+    asyncio.run(scenario())

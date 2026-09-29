@@ -26,6 +26,8 @@ from ppt_agent.api.planning import (
     ProjectAuthorizer,
     planning_router,
 )
+from ppt_agent.api.materials import MaterialScheduler, materials_router
+from ppt_agent.materials.service import MaterialService
 from ppt_agent.events.sse import EventStreamService
 from ppt_agent.runtime.application import ApplicationRuntime
 
@@ -52,6 +54,8 @@ def create_app(
     planning_supervisor: PlanningSupervisor | None = None,
     authorize_project: ProjectAuthorizer | None = None,
     input_limits: InputLimits | None = None,
+    material_service: MaterialService | None = None,
+    material_supervisor: MaterialScheduler | None = None,
 ) -> FastAPI:
     """Create an application instance without import-time side effects."""
 
@@ -153,14 +157,11 @@ def create_app(
             )
 
     app.include_router(router)
-    planning_components = (
-        planning_workflow,
-        planning_supervisor,
-        authorize_project,
-    )
+    planning_components = (planning_workflow, planning_supervisor)
     if any(value is not None for value in planning_components):
         if (
             not all(value is not None for value in planning_components)
+            or authorize_project is None
             or authorize_run is None
         ):
             raise ValueError("all planning route dependencies are required")
@@ -172,6 +173,21 @@ def create_app(
                 supervisor=planning_supervisor,  # type: ignore[arg-type]
                 authorize_project=authorize_project,  # type: ignore[arg-type]
                 authorize_run=authorize_run,  # type: ignore[arg-type]
+                security=security,
+                input_limits=input_limits or InputLimits(),
+            )
+        )
+    material_components = (material_service, material_supervisor)
+    if any(value is not None for value in material_components):
+        if not all(value is not None for value in material_components) or authorize_project is None:
+            raise ValueError("all material route dependencies are required")
+        if not security.authentication_enabled:
+            raise ValueError("local authentication is required for material routes")
+        app.include_router(
+            materials_router(
+                service=material_service,  # type: ignore[arg-type]
+                supervisor=material_supervisor,  # type: ignore[arg-type]
+                authorize_project=authorize_project,
                 security=security,
                 input_limits=input_limits or InputLimits(),
             )
