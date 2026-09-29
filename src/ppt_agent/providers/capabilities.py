@@ -43,12 +43,21 @@ class BillingCapabilities(CapabilityModel):
     region: str = Field(min_length=1)
 
 
+class VisionCapabilities(CapabilityModel):
+    input_formats: tuple[str, ...]
+    max_input_bytes: int = Field(gt=0)
+    max_pixels: int = Field(gt=0)
+    structured_output: bool
+    positional_ocr: bool = False
+
+
 class ProviderCapabilities(CapabilityModel):
     provider: str = Field(min_length=1)
     model: str = Field(min_length=1)
     operation_mode: OperationMode
     supports: ProviderFeatureSupport
     image: ImageCapabilities | None = None
+    vision: VisionCapabilities | None = None
     billing: BillingCapabilities
     data_policy_ref: str = Field(min_length=1)
     result_url_ttl_seconds: int | None = Field(default=None, gt=0)
@@ -77,4 +86,3 @@ class ProviderCapabilities(CapabilityModel):
             raise UnsupportedProviderCapability("image aspect ratio is unsupported")
         if require_native_mask and not image.native_mask:
             raise UnsupportedProviderCapability("native mask is unsupported")
-
