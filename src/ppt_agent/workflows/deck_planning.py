@@ -96,8 +96,14 @@ class DeckPlanningWorkflow:
         project_id: str,
         normalized_text: str,
         source_refs: tuple[str, ...] = (),
+        validate_source_refs: bool = False,
     ):
-        return self.store.create_run(project_id, source_refs, normalized_text)
+        return self.store.create_run(
+            project_id,
+            source_refs,
+            normalized_text,
+            validate_source_refs=validate_source_refs,
+        )
 
     async def execute(self, run_id: str) -> None:
         run = self.store.repository.get_run(run_id)

@@ -7,7 +7,7 @@ from typing import Literal
 from uuid import uuid4
 
 from pydantic import Field, model_validator
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 
 from ppt_agent.domain.contracts import ContractModel
 from ppt_agent.domain.artifacts import CONTENT_DEPENDENCY_EDGES, ArtifactStatus
@@ -98,14 +98,35 @@ class PlanningStore:
         self.repository = WorkflowRepository(sessions)
 
     def create_run(
-        self, project_id: str, source_refs: tuple[str, ...], normalized_text: str
+        self,
+        project_id: str,
+        source_refs: tuple[str, ...],
+        normalized_text: str,
+        *,
+        validate_source_refs: bool = False,
     ) -> RunSnapshot:
         if not normalized_text.strip():
             raise ValueError("normalized planning text must not be empty")
+        if len(source_refs) != len(set(source_refs)):
+            raise ValueError("source artifact references must be unique")
         run_id = str(uuid4())
         with session_scope(self._sessions) as session:
+            if validate_source_refs:
+                session.execute(text("BEGIN IMMEDIATE"))
             if session.get(ProjectRecord, project_id) is None:
                 raise LookupError(f"project not found: {project_id}")
+            if validate_source_refs:
+                for artifact_id in source_refs:
+                    artifact = session.get(ArtifactRecord, artifact_id)
+                    if (
+                        artifact is None
+                        or artifact.project_id != project_id
+                        or artifact.kind != "parsed_material"
+                        or artifact.status is not ArtifactStatus.AVAILABLE
+                    ):
+                        raise ValueError(
+                            f"source artifact is not an available parsed material: {artifact_id}"
+                        )
             run = WorkflowRunRecord(
                 id=run_id,
                 project_id=project_id,

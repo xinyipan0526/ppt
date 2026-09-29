@@ -7,7 +7,7 @@ from uuid import uuid4
 import pytest
 from sqlalchemy import func, select
 
-from ppt_agent.artifacts.store import ArtifactStore
+from ppt_agent.artifacts.store import ArtifactStore, CreateArtifact
 from ppt_agent.domain.artifacts import ArtifactStatus
 from ppt_agent.domain.contracts import (
     BriefDecision,
@@ -83,6 +83,36 @@ def test_planning_store_creates_immutable_input_and_stable_steps() -> None:
     assert completed.status is StepStatus.SUCCEEDED
     assert second.stage == "build_outline"
     assert len(records) == 1
+
+
+def test_planning_store_validates_source_artifacts_in_creation_transaction() -> None:
+    engine, sessions, store, project_id = setup_store()
+    artifacts = ArtifactStore(
+        sessions, Path(".cache/test-deck-workflow") / str(uuid4())
+    )
+    staged = artifacts.create_staging(
+        CreateArtifact(
+            project_id=project_id, logical_id="parsed:planning", kind="parsed_material",
+            media_type="application/json", extension=".json", spec_fingerprint="parsed",
+            metadata={},
+        )
+    )
+    artifacts.write_staging(staged.id, [b"{}"])
+    artifacts.commit_file(staged.id)
+    artifacts.commit_metadata(staged.id)
+    available = artifacts.make_available(staged.id)
+    try:
+        run = store.create_run(
+            project_id, (available.id,), "source", validate_source_refs=True
+        )
+        artifacts.mark_stale(available.id)
+        with pytest.raises(ValueError, match="source artifact"):
+            store.create_run(
+                project_id, (available.id,), "source", validate_source_refs=True
+            )
+    finally:
+        engine.dispose()
+    assert store.current_input(run.id).source_refs == (available.id,)
 
 
 def test_revision_creates_new_input_and_restarts_from_deterministic_scope() -> None:

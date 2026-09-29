@@ -6,7 +6,7 @@
 
 本项目不是一次性的能力演示。设计目标是构建一个关注生成效果、成本、稳定性、可观测性和可恢复性的生产级本地应用。
 
-> 当前仓库处于产品与架构设计阶段。本文档是首版设计基线，具体模型版本、接口参数和依赖版本将在实现阶段通过配置与锁文件确定。
+> 当前仓库已完成本地持久化/恢复基础设施、DeepSeek 结构化文本适配、可中断的确定性规划闭环，以及 Markdown、PDF、PNG/JPEG/WebP 的受限素材摄取。Seedream/Qwen、确定性页面渲染、导出、OCR 与前端仍待实现；当前可运行范围与恢复检查点以 [AGENTS.md](AGENTS.md) 为准。
 
 ## 1. 产品定位
 
@@ -541,10 +541,11 @@ SQLite 是 Workflow、页面状态、Interrupt 和执行事件的唯一事实源
 
 ### 14.3 解析、图片和导出
 
-- PDF：PyMuPDF
-- Markdown：markdown-it-py
-- OCR：PaddleOCR
-- 图片处理：Pillow + OpenCV
+- PDF：pypdf（已用于受限文本/元数据解析）
+- Markdown：内置确定性分块与外部引用提取（已实现，不获取远端资源）
+- 图片解析：Pillow（已用于格式、像素、帧数和压缩限制检查）
+- OCR：PaddleOCR（规划中，尚未接入）
+- 后续图片处理：Pillow + OpenCV
 - 确定性页面渲染：受限 HTML/CSS/SVG + Playwright/Chromium
 - PPTX：python-pptx
 - PDF/ZIP：Python 生态库和标准库

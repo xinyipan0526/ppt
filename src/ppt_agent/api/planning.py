@@ -4,12 +4,16 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
+import json
 from typing import Any, Protocol
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, ConfigDict, Field
 
 from ppt_agent.api.security import InputLimits, LocalHTTPSecurity
+from ppt_agent.domain.materials import ParsedMaterialV1
+from ppt_agent.materials.service import MaterialService
+from ppt_agent.materials.store import MaterialConflict, MaterialNotFound, ResolvedMaterial
 from ppt_agent.runtime.repository import InterruptConflict, RecordNotFound
 from ppt_agent.tools.clarification import ClarificationValidationError
 from ppt_agent.workflows.planning_store import PlanningStore
@@ -28,6 +32,7 @@ class PlanningWorkflow(Protocol):
         project_id: str,
         normalized_text: str,
         source_refs: tuple[str, ...] = (),
+        validate_source_refs: bool = False,
     ) -> Any: ...
 
 
@@ -38,8 +43,8 @@ class PlanningSupervisor(Protocol):
 class PlanningRunCreate(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
-    normalized_text: str = Field(min_length=1)
-    source_refs: tuple[str, ...] = ()
+    normalized_text: str = ""
+    material_ids: tuple[str, ...] = Field(default=(), max_length=100)
 
 
 class InterruptResume(BaseModel):
@@ -57,6 +62,7 @@ def planning_router(
     authorize_run: RunAuthorizer,
     security: LocalHTTPSecurity,
     input_limits: InputLimits,
+    material_service: MaterialService | None = None,
 ) -> APIRouter:
     """Build routes without weakening transport or resource ownership checks."""
 
@@ -74,12 +80,41 @@ def planning_router(
         await authorize_project(project_id)
         if len(request.normalized_text) > input_limits.max_markdown_characters:
             raise HTTPException(status_code=413, detail="planning input is too large")
+        if not request.normalized_text and not request.material_ids:
+            raise HTTPException(
+                status_code=422,
+                detail="planning input requires text or at least one material",
+            )
         try:
+            resolved: tuple[ResolvedMaterial, ...] = ()
+            if request.material_ids:
+                if material_service is None:
+                    raise HTTPException(
+                        status_code=503, detail="material ingestion is not configured"
+                    )
+                resolved = await asyncio.to_thread(
+                    material_service.store.resolve_ready,
+                    project_id,
+                    request.material_ids,
+                )
+            compiled_text, source_refs = await asyncio.to_thread(
+                _compile_planning_sources,
+                request.normalized_text,
+                resolved,
+                material_service,
+            )
             run = await workflow.create_run(
                 project_id=project_id,
-                normalized_text=request.normalized_text,
-                source_refs=request.source_refs,
+                normalized_text=compiled_text,
+                source_refs=source_refs,
+                validate_source_refs=bool(source_refs),
             )
+        except MaterialNotFound as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except MaterialConflict as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         except LookupError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         supervisor.schedule(run.id)
@@ -161,3 +196,55 @@ def planning_router(
 
 def _single_ref(refs: tuple[str, ...]) -> str | None:
     return refs[0] if len(refs) == 1 else None
+
+
+def _compile_planning_sources(
+    normalized_text: str,
+    materials: tuple[ResolvedMaterial, ...],
+    material_service: MaterialService | None,
+) -> tuple[str, tuple[str, ...]]:
+    """Compile trusted transport fields and untrusted parsed blocks deterministically."""
+
+    records: list[dict[str, Any]] = []
+    if normalized_text:
+        records.append({"kind": "typed_user_input", "text": normalized_text})
+    if materials and material_service is None:
+        raise RuntimeError("material service is required to compile materials")
+    for resolved in materials:
+        payload = material_service.artifacts.read_bytes(resolved.parsed_artifact.id)  # type: ignore[union-attr]
+        parsed = ParsedMaterialV1.model_validate_json(payload)
+        if (
+            parsed.material_id != resolved.material.id
+            or parsed.source_artifact_id != resolved.material.source_artifact_id
+        ):
+            raise ValueError(
+                f"parsed material identity does not match: {resolved.material.id}"
+            )
+        if parsed.text_blocks:
+            for block in parsed.text_blocks:
+                records.append(
+                    {
+                        "kind": "untrusted_source_content",
+                        "locator": block.locator.model_dump(mode="json", exclude_none=True),
+                        "material_id": parsed.material_id,
+                        "media_type": parsed.media_type,
+                        "source_artifact_id": parsed.source_artifact_id,
+                        "text": block.text,
+                    }
+                )
+        else:
+            records.append(
+                {
+                    "kind": "untrusted_source_content",
+                    "material_id": parsed.material_id,
+                    "media_type": parsed.media_type,
+                    "metadata": parsed.metadata.model_dump(mode="json", exclude_none=True),
+                    "source_artifact_id": parsed.source_artifact_id,
+                    "text": "",
+                }
+            )
+    compiled = "\n".join(
+        json.dumps(record, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        for record in records
+    )
+    return compiled, tuple(item.parsed_artifact.id for item in materials)

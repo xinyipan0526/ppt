@@ -114,10 +114,13 @@ git status --short
 | `0d276e0` | PlanningStore、版本化 Prompt 与确定性 Deck Planning Workflow |
 | `2c942d0` | 规划 HTTP API、运行时 Workflow 组合与 opt-in Provider live test |
 | `cbdde09` | 独立审查修复：付费结果落盘、原子复核、定向页修订与安全计费边界 |
+| `4b72261` | Source Material 领域契约、迁移、状态持久化与原子项目配额 |
+| `569d2d0` | Markdown、PDF、图片解析器与有界子进程隔离 |
+| `7e7f171` | Artifact-first 素材服务、调度器、恢复、HTTP API 与 Runtime 组合 |
 
 截至当前基础设施里程碑：
 
-- 全量测试为 `245 passed, 3 skipped`；两项跳过来自当前 Windows 账户无法创建符号链接，一项为默认关闭的真实 DeepSeek 计费测试。
+- 全量测试为 `294 passed, 3 skipped`；两项跳过来自当前 Windows 账户无法创建符号链接，一项为默认关闭的真实 DeepSeek 计费测试。
 - 事件序号通过 Run 行上的原子 `UPDATE ... RETURNING` 分配。
 - 状态变化与核心事件在同一事务提交。
 - SSE 支持一致快照、`Last-Event-ID`、游标过期和有界批量读取。
@@ -139,14 +142,18 @@ git status --short
 - 结构化 Provider 成功结果在 Attempt 被选定前与 Usage 原子落入 `provider_text_results`；即使进程在返回后、Artifact 创建前崩溃，也可重放已验证结果而不产生第二次调用。
 - 复核批准/取消及修订代际创建已收敛为事务边界；Bundle 和 PageSpec Patch 具备确定性恢复键，定向页修订只替换选中页并保留未选中页引用。
 - HTTP 429/5xx 和未映射错误不再仅凭状态码释放预算；保守最大 Token 成本必须由预留覆盖，计费不确定结果进入人工恢复路径。
+- Source Material 以 `uploaded → parsing → ready/failed → deleted` 状态持久化；原文件和解析结果均为版本化 Artifact，启动时可对中断解析与失效引用进行对账。
+- Markdown、PDF、PNG/JPEG/WebP 使用内容优先识别和严格限制解析；Pillow 与 pypdf 运行在 spawn 子进程中，父进程执行超时、IPC 大小和结果 Schema 复核。Windows 当前只具备进程隔离与超时终止，无法提供 POSIX `rlimit` 的同等级资源约束。
+- 素材上传、查询、重试和删除 API 已接入认证、项目授权、流式字节上限与全局/项目解析并发边界；项目累计上传配额在 SQLite `BEGIN IMMEDIATE` 事务内复核。
+- 规划创建 API 只接受用户文本和 `material_ids`，不接受客户端伪造的 Artifact 引用；解析块以规范 JSON 的 `untrusted_source_content` 边界编译，并在创建 Run 的同一写事务中复核 parsed Artifact 的项目、类型和可用状态。
 
 ## 6. 下一步
 
-持久化、状态机、DeepSeek 文本适配和确定性规划闭环已经完成。下一开发批次应进入 **输入解析与渲染/图片能力**：
+持久化、状态机、DeepSeek 文本适配、确定性规划闭环和输入解析已经完成。下一开发批次应进入 **图片 Provider 与确定性渲染/导出**：
 
-- 接入 Markdown、PDF 和图片解析器，实际执行字节数、页数、像素、压缩比、外部资源和超时限制，并将解析内容始终视为不可信数据。
 - 实现 Seedream 图片 Provider 能力与 Qwen 视觉理解适配，沿用现有 Operation/Attempt、预算预留和未知结果恢复协议。
 - 实现确定性 HTML/CSS/SVG 文字排版、整页合成、单页重生成，以及 PNG/JPG、ZIP、PDF 和图片型 PPTX 导出链路。
+- 增加 OCR/视觉质量检查，并把输入图片的视觉语义接入规划 Context；当前图片解析只验证格式和元数据，不执行 OCR 或视觉理解。
 - 在渲染链路稳定后再接入 React 规划复核界面和局部编辑 Sub-workflow。
 
 下一批仍不应提前扩展 React 前端或元素级可编辑 PPTX；先保持 Provider 与 Workflow 通过已完成的持久化协议闭环运行。
@@ -158,7 +165,7 @@ git status --short
 - Run 所有权规则仍由应用层注入的 `authorize_run` 实现；本地单用户令牌只提供应用级认证，不能替代资源级校验。
 - Workspace 路径审查裁决：并发换链 TOCTOU 需要已取得同一 OS 用户权限的恶意进程，超出一期威胁模型；静态链接在 I/O 前拒绝，写入/重命名后仍复核。
 - 当前 Windows 测试环境不能创建符号链接；在具备开发者模式或 CI 权限的 Windows 环境中仍需运行 link/junction 用例。
-- Seedream、视觉理解、Renderer、输入解析/OCR、导出和前端尚未进入实现阶段；当前 live Provider 测试只有在显式设置开关及全部 DeepSeek 配置时才会产生真实请求。
+- Seedream、视觉理解、Renderer、OCR、导出和前端尚未进入实现阶段；Markdown/PDF/图片的受限解析已完成，但扫描 PDF 和图片不会在无 OCR 时产生正文。当前 live Provider 测试只有在显式设置开关及全部 DeepSeek 配置时才会产生真实请求。
 - 当前默认导出的 `app` 仍只提供未配置的应用骨架；实际规划路由通过 `create_app` 显式注入 Runtime、Workflow、Supervisor、认证和资源授权。面向最终用户的环境变量/配置文件启动器应与下一阶段应用配置一起实现。
 - Provider 的 `retryable` 目前只用于能力映射，不自动定时重试；这是为了避免在尚无持久化计时调度器时产生隐式重复费用。已知失败由用户显式重试，计费不确定失败必须先完成恢复或风险确认。
 - 意图是否需要澄清仍由受 Schema 约束的 Brief 决策模型判断；不可信输入边界已改为 JSON 字符串编码并转义闭合标记，但尚未增加领域专用的确定性“信息充分度”规则。

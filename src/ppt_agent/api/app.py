@@ -175,6 +175,7 @@ def create_app(
                 authorize_run=authorize_run,  # type: ignore[arg-type]
                 security=security,
                 input_limits=input_limits or InputLimits(),
+                material_service=material_service,
             )
         )
     material_components = (material_service, material_supervisor)
