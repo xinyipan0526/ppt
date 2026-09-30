@@ -19,9 +19,11 @@ from ppt_agent.storage.database import SessionFactory, session_scope
 from ppt_agent.storage.models import (
     PageRecord,
     ProviderAttemptRecord,
+    ProviderBinaryResultRecord,
     ProviderOperationRecord,
     ProviderRetryAuthorizationRecord,
     ProviderTextResultRecord,
+    ProviderVisionResultRecord,
     UsageRecord,
     WorkflowRunRecord,
     WorkflowStepRecord,
@@ -98,6 +100,30 @@ class AttemptSnapshot:
 
 @dataclass(frozen=True, slots=True)
 class StoredTextResult:
+    operation_id: str
+    attempt_id: str
+    request_fingerprint: str
+    schema_name: str
+    schema_version: int
+    output_payload: dict[str, Any]
+    usage: dict[str, int]
+
+
+@dataclass(frozen=True, slots=True)
+class StoredBinaryResult:
+    operation_id: str
+    attempt_id: str
+    request_fingerprint: str
+    result_kind: str
+    result_value: str
+    media_type: str
+    usage: dict[str, Any]
+    download_status: str
+    artifact_id: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class StoredVisionResult:
     operation_id: str
     attempt_id: str
     request_fingerprint: str
@@ -277,6 +303,8 @@ class ProviderOperationService:
         schema_version: int | None = None,
         output_payload: dict[str, Any] | None = None,
         text_usage: dict[str, int] | None = None,
+        binary_result: dict[str, Any] | None = None,
+        vision_result: dict[str, Any] | None = None,
     ) -> AttemptSnapshot:
         with session_scope(self._sessions) as session:
             self._ledger.begin_write_transaction(session)
@@ -297,6 +325,11 @@ class ProviderOperationService:
             attempt.response_summary = response_summary
             operation = self._require_operation(session, attempt.operation_id)
             text_values = (schema_name, schema_version, output_payload, text_usage)
+            families = sum(
+                (any(value is not None for value in text_values), binary_result is not None, vision_result is not None)
+            )
+            if families > 1:
+                raise OperationConflict("only one durable result family may be recorded")
             if any(value is not None for value in text_values):
                 if not all(value is not None for value in text_values):
                     raise OperationConflict("durable text result fields must be complete")
@@ -308,6 +341,34 @@ class ProviderOperationService:
                         schema_version=schema_version,  # type: ignore[arg-type]
                         output_payload=dict(output_payload or {}),
                         usage=dict(text_usage or {}),
+                    )
+                )
+                session.flush()
+            elif binary_result is not None:
+                session.add(
+                    ProviderBinaryResultRecord(
+                        operation_id=operation.id,
+                        attempt_id=attempt.id,
+                        request_fingerprint=operation.request_fingerprint,
+                        result_kind=str(binary_result["result_kind"]),
+                        result_value=str(binary_result["result_value"]),
+                        media_type=str(binary_result["media_type"]),
+                        usage=dict(binary_result["usage"]),
+                        download_status=str(binary_result.get("download_status", "stored")),
+                        artifact_id=binary_result.get("artifact_id"),
+                    )
+                )
+                session.flush()
+            elif vision_result is not None:
+                session.add(
+                    ProviderVisionResultRecord(
+                        operation_id=operation.id,
+                        attempt_id=attempt.id,
+                        request_fingerprint=operation.request_fingerprint,
+                        schema_name=str(vision_result["schema_name"]),
+                        schema_version=int(vision_result["schema_version"]),
+                        output_payload=dict(vision_result["output_payload"]),
+                        usage=dict(vision_result["usage"]),
                     )
                 )
                 session.flush()
@@ -331,6 +392,36 @@ class ProviderOperationService:
                 schema_version=record.schema_version,
                 output_payload=dict(record.output_payload),
                 usage={key: int(value) for key, value in record.usage.items()},
+            )
+
+    def get_binary_result(self, operation_id: str) -> StoredBinaryResult | None:
+        with session_scope(self._sessions) as session:
+            operation = session.get(ProviderOperationRecord, operation_id)
+            if operation is None or operation.selected_attempt_id is None:
+                return None
+            record = session.get(ProviderBinaryResultRecord, operation_id)
+            if record is None or record.attempt_id != operation.selected_attempt_id:
+                raise OperationConflict("selected image operation has no durable result")
+            return StoredBinaryResult(
+                operation.id, record.attempt_id, record.request_fingerprint,
+                record.result_kind, record.result_value, record.media_type,
+                dict(record.usage),
+                record.download_status, record.artifact_id,
+            )
+
+    def get_vision_result(self, operation_id: str) -> StoredVisionResult | None:
+        with session_scope(self._sessions) as session:
+            operation = session.get(ProviderOperationRecord, operation_id)
+            if operation is None or operation.selected_attempt_id is None:
+                return None
+            record = session.get(ProviderVisionResultRecord, operation_id)
+            if record is None or record.attempt_id != operation.selected_attempt_id:
+                raise OperationConflict("selected vision operation has no durable result")
+            return StoredVisionResult(
+                operation.id, record.attempt_id, record.request_fingerprint,
+                record.schema_name, record.schema_version,
+                dict(record.output_payload),
+                {key: int(value) for key, value in record.usage.items()},
             )
 
     def record_known_failure(
