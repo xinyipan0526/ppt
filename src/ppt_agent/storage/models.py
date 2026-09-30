@@ -659,6 +659,9 @@ class PageGenerationRecord(TimestampMixin, Base):
     page_image_artifact_id: Mapped[str | None] = mapped_column(
         ForeignKey("artifacts.id", ondelete="SET NULL")
     )
+    thumbnail_artifact_id: Mapped[str | None] = mapped_column(
+        ForeignKey("artifacts.id", ondelete="SET NULL")
+    )
     quality_artifact_id: Mapped[str | None] = mapped_column(
         ForeignKey("artifacts.id", ondelete="SET NULL")
     )
