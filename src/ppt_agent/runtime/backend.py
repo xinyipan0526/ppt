@@ -127,6 +127,10 @@ class BackendWorkflowDispatcher:
         self._image_provider_name = "seedream" if settings.provider_mode == "cloud" else "deterministic"
         self._vision_provider_name = "qwen" if settings.provider_mode == "cloud" else "deterministic"
 
+    def reconfigure(self, settings: Settings) -> None:
+        """Replace provider-backed workflow components while the runtime is idle."""
+        self.__init__(self.sessions, self.artifacts, self.repository, settings)
+
     async def execute(self, run_id: str) -> None:
         try:
             await self._execute(run_id)
@@ -528,6 +532,15 @@ def build_material_runtime(
     settings: Settings,
 ) -> MaterialRuntime:
     store = MaterialStore(sessions, artifacts, max_project_bytes=limits.max_project_upload_bytes)
+    analyze = build_material_image_analyzer(sessions, settings)
+    service = MaterialService(store, artifacts, ParserWorker(workspace), limits, image_analyzer=analyze)
+    supervisor = MaterialSupervisor(store, service.parse, global_limit=2, project_limit=1)
+    runtime = MaterialRuntime(store, supervisor, shutdown_timeout=shutdown_timeout)
+    runtime.service = service  # type: ignore[attr-defined]
+    return runtime
+
+
+def build_material_image_analyzer(sessions: SessionFactory, settings: Settings):
     operations = ProviderOperationService(sessions)
     ledger = CostLedger(sessions)
     provider_name = "qwen" if settings.provider_mode == "cloud" else "deterministic"
@@ -559,8 +572,4 @@ def build_material_runtime(
         )
         return result.output  # type: ignore[return-value]
 
-    service = MaterialService(store, artifacts, ParserWorker(workspace), limits, image_analyzer=analyze)
-    supervisor = MaterialSupervisor(store, service.parse, global_limit=2, project_limit=1)
-    runtime = MaterialRuntime(store, supervisor, shutdown_timeout=shutdown_timeout)
-    runtime.service = service  # type: ignore[attr-defined]
-    return runtime
+    return analyze

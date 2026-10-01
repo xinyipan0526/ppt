@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import secrets
+import hashlib
+import hmac
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 from urllib.parse import urlsplit
 
-from fastapi import HTTPException, Request
+from fastapi import HTTPException, Request, Response
 
 
 class TokenStorageUnavailable(RuntimeError):
@@ -174,6 +176,12 @@ class LocalHTTPSecurity:
             raise ValueError("local access token must be at least 32 characters")
         self._token = token
         self.config = config or LocalHTTPConfig()
+        self.cookie_name = "ppt_agent_session"
+        self._csrf_token = (
+            hmac.new(token.encode(), b"ppt-agent-browser-csrf-v1", hashlib.sha256).hexdigest()
+            if token is not None
+            else None
+        )
 
     @property
     def authentication_enabled(self) -> bool:
@@ -199,17 +207,44 @@ class LocalHTTPSecurity:
             raise HTTPException(status_code=503, detail="local authentication unavailable")
         authorization = request.headers.get("authorization", "")
         scheme, separator, candidate = authorization.partition(" ")
-        if (
-            separator != " "
-            or scheme.casefold() != "bearer"
-            or not candidate
-            or not secrets.compare_digest(candidate, self._token)
-        ):
+        bearer_valid = (
+            separator == " "
+            and scheme.casefold() == "bearer"
+            and bool(candidate)
+            and secrets.compare_digest(candidate, self._token)
+        )
+        if bearer_valid:
+            return
+        cookie = request.cookies.get(self.cookie_name, "")
+        cookie_valid = bool(cookie) and secrets.compare_digest(cookie, self._token)
+        if not cookie_valid:
             raise HTTPException(
                 status_code=401,
                 detail="authentication required",
                 headers={"WWW-Authenticate": "Bearer"},
             )
+        if request.method.upper() in {"POST", "PUT", "PATCH", "DELETE"}:
+            csrf = request.headers.get("x-csrf-token", "")
+            if self._csrf_token is None or not secrets.compare_digest(csrf, self._csrf_token):
+                raise HTTPException(status_code=403, detail="CSRF validation failed")
+
+    @property
+    def csrf_token(self) -> str:
+        if self._csrf_token is None:
+            raise TokenStorageUnavailable("browser session authentication is unavailable")
+        return self._csrf_token
+
+    def establish_browser_session(self, response: Response) -> None:
+        if self._token is None:
+            raise TokenStorageUnavailable("browser session authentication is unavailable")
+        response.set_cookie(
+            self.cookie_name,
+            self._token,
+            httponly=True,
+            samesite="strict",
+            secure=False,
+            path="/",
+        )
 
 
 def _valid_authority(authority: str) -> bool:

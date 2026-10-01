@@ -8,7 +8,7 @@ from contextlib import asynccontextmanager
 from dataclasses import asdict
 from typing import AsyncIterator
 
-from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Request
+from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Request, Response
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
@@ -103,6 +103,11 @@ def create_app(
             status_code=200 if ready else 503,
             content={"status": "ready" if ready else "not_ready"},
         )
+
+    @router.get("/session")
+    async def browser_session(response: Response) -> object:
+        security.establish_browser_session(response)
+        return {"csrf_token": security.csrf_token}
 
     if event_stream is not None or runtime is not None:
         if authorize_run is None:

@@ -14,14 +14,20 @@ ConnectionTest = Callable[[], Awaitable[dict[str, object]]]
 
 
 def providers_router(
-    *, settings: Settings, security: LocalHTTPSecurity,
+    *, settings: Settings | None = None,
+    resolve_settings: Callable[[], Settings] | None = None,
+    security: LocalHTTPSecurity,
     connection_tests: dict[str, ConnectionTest] | None = None,
 ) -> APIRouter:
+    if (settings is None) == (resolve_settings is None):
+        raise ValueError("provide exactly one settings source")
+    current = resolve_settings or (lambda: settings)  # type: ignore[return-value]
     router = APIRouter(prefix="/api/v1", dependencies=[Depends(security.authenticate)])
     tests = connection_tests or {}
 
     @router.get("/providers")
     async def provider_status() -> dict:
+        settings = current()
         return {
             "mode": settings.provider_mode,
             "providers": {
@@ -33,6 +39,7 @@ def providers_router(
 
     @router.post("/providers/{provider}/test")
     async def test_provider(provider: str) -> dict:
+        settings = current()
         if settings.provider_mode == "deterministic":
             if provider not in {"deepseek", "seedream", "qwen"}:
                 raise HTTPException(status_code=404, detail="provider not found")

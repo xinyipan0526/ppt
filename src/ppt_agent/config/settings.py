@@ -169,7 +169,7 @@ def load_settings(
     if overrides:
         values.update({key: value for key, value in overrides.items() if value is not None})
     settings = replace(Settings(), **values)
-    _validate(settings)
+    validate_settings(settings)
     return settings
 
 
@@ -216,7 +216,7 @@ def _toml_values(document: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-def _validate(settings: Settings) -> None:
+def validate_settings(settings: Settings) -> None:
     if settings.provider_mode not in {"deterministic", "cloud"}:
         raise SettingsError("provider mode must be deterministic or cloud")
     if not 1 <= settings.port <= 65535:

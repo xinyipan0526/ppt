@@ -4,6 +4,7 @@
 pytest-cache-files-*/
 .coverage
 htmlcov/
+.superpowers/
 
 __pycache__/
 *.py[cod]
