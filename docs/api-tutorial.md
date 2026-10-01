@@ -61,3 +61,5 @@ Invoke-WebRequest -Uri "$base/api/v1/exports/$($export.export_id)/download" -Hea
 ## 4. 未知远端结果
 
 查询 `GET /api/v1/operations/{operation_id}`。若 Attempt 为 `outcome_unknown`，系统不会自动重发；确认远端确无可回收结果并接受重复计费风险后，调用 `/operations/{operation_id}/authorize-retry`，提交 `expected_attempt_id` 和说明。成本汇总见 `GET /api/v1/projects/{project_id}/costs`。
+
+只有 Provider 明确确认“未计费”且错误标记为 `retryable` 时，服务才会保存到期时间并自动重新入队。普通本地失败进入 `recovery_required` 后，可在确认失败点不含不确定远端调用时调用 `POST /api/v1/runs/{run_id}/authorize-local-retry`；接口会再次复核 Attempt 状态，存在不确定结果时拒绝授权。

@@ -75,7 +75,7 @@ docs/specs/          # 已确认的正式技术协议
 3. 一个批次内可以集中编写测试、连续实现多个相邻模块并统一调试，但最终必须覆盖错误、并发、恢复、迁移和安全边界。
 4. 在合并批次结束时统一运行相关测试与全量测试，进行一次独立代码审查；Critical 和 Important 问题仍必须修复并增加回归测试。
 5. 最终运行 `compileall` 与 `git diff --check`。提交按可恢复检查点拆分，不强制每个内部模块单独提交，也不把未验证的半成品提交为完成状态。
-6. 不因批次扩大而顺手实现 Renderer、OCR、前端或 Deck 业务 Workflow；它们不属于当前基础设施里程碑。
+6. 后端里程碑已包含 Renderer、OCR 与 Deck Workflow；下一阶段只实现 React 前端，不扩展元素级可编辑 PPTX、云端多租户或二期画布能力。
 
 开发环境已经位于 `.venv`。PowerShell 常用验证命令：
 
@@ -119,10 +119,16 @@ git status --short
 | `7e7f171` | Artifact-first 素材服务、调度器、恢复、HTTP API 与 Runtime 组合 |
 | `7374213` | 素材解析结果可信边界编译、规划 Run 事务内复核与来源接线 |
 | `bdba6e8` | 独立审查修复：恢复引用、上传清理、解析资源上限、子进程取消、规划竞态与来源依赖 |
+| `28834a3` | 生产合同与持久化 Schema |
+| `5871ec7` | 图片/视觉 Provider 协议与确定性实现 |
+| `70ad1d6` | Seedream、Qwen 与持久化 Operation Runner |
+| `83ab8b7` | 确定性布局、Chromium 渲染和质量验证 |
+| `4eb4938` | 可恢复的生产 Page Pipeline |
+| `fe8f965` | 完整后端服务、编辑/导出/API/CLI/配置/文档与端到端验证 |
 
 截至当前基础设施里程碑：
 
-- 全量测试为 `306 passed, 3 skipped`；两项跳过来自当前 Windows 账户无法创建符号链接，一项为默认关闭的真实 DeepSeek 计费测试。
+- 全量测试为 `372 passed, 5 skipped`；两项跳过来自当前 Windows 账户无法创建符号链接，三项为默认关闭的 DeepSeek、Seedream、Qwen 真实计费测试。
 - 事件序号通过 Run 行上的原子 `UPDATE ... RETURNING` 分配。
 - 状态变化与核心事件在同一事务提交。
 - SSE 支持一致快照、`Last-Event-ID`、游标过期和有界批量读取。
@@ -150,30 +156,35 @@ git status --short
 - 规划创建 API 只接受用户文本和 `material_ids`，不接受客户端伪造的 Artifact 引用；解析块以规范 JSON 的 `untrusted_source_content` 边界编译，并在创建 Run 的同一写事务中复核 parsed Artifact 的项目、类型和可用状态。
 - 独立审查后，素材恢复会原子替换过期 parsed 引用；上传执行项目剩余额度预检和竞态失败清理；二进制签名可跨任意 HTTP 分片识别；图片增加宽高、解码字节与逐帧解码上限；关机取消会终止并 join 解析子进程。
 - 规划 Context 设有聚合 UTF-8 字节上限，并在 Run 创建事务中同时复核 Material `ready` 状态与 parsed Artifact 绑定；Brief Artifact 通过依赖边追溯并保护输入素材。
+- Seedream 图片生成/参考图编辑、Qwen 视觉理解/OCR 已通过统一能力层接入；成功响应先持久化，再下载/验证 Artifact，URL 下载执行 HTTPS、精确 Host、DNS/IP、重定向、媒体、像素和字节限制。
+- HTML/CSS/SVG 模板与 Playwright Chromium 完成确定性文字排版、页面合成和 DOM/图像质量检查；字体清单及内容哈希参与缓存身份。
+- 生产、单页重生成、自然语言内容/样式/视觉编辑均保存不可变代际与依赖；内容/样式编辑不调用图片 Provider，视觉编辑使用 Qwen 定位、Seedream 编辑后重新合成确定性文字。
+- PNG/JPG、ZIP、PDF 和图片型 PPTX 导出已实现，导出前复核页代际/质量/未知远端结果，下载支持鉴权与单段 HTTP Range。
+- 原生 `ppt-agent serve|doctor|migrate`、确定性无 Key 模式、cloud 模式、TOML/环境变量/Secret 文件配置、Docker/Compose 和完整 HTTP API 已组合到同一 Runtime。
+- 仅“明确未计费且 retryable”的 Provider 失败会保存 due time 并由单进程调度器恢复；未知结果继续持有预算并要求人工授权。
+- 确定性 API 端到端测试覆盖项目、规划复核、8 页生产、单页编辑、PPTX 导出、下载与 Range；真实 Provider 测试必须显式打开独立开关。
 
 ## 6. 下一步
 
-持久化、状态机、DeepSeek 文本适配、确定性规划闭环和输入解析已经完成。下一开发批次应进入 **图片 Provider 与确定性渲染/导出**：
+后端一期需求已经完成。下一开发批次进入 **React 前端 UI**：
 
-- 实现 Seedream 图片 Provider 能力与 Qwen 视觉理解适配，沿用现有 Operation/Attempt、预算预留和未知结果恢复协议。
-- 实现确定性 HTML/CSS/SVG 文字排版、整页合成、单页重生成，以及 PNG/JPG、ZIP、PDF 和图片型 PPTX 导出链路。
-- 增加 OCR/视觉质量检查，并把输入图片的视觉语义接入规划 Context；当前图片解析只验证格式和元数据，不执行 OCR 或视觉理解。
-- 在渲染链路稳定后再接入 React 规划复核界面和局部编辑 Sub-workflow。
-
-下一批仍不应提前扩展 React 前端或元素级可编辑 PPTX；先保持 Provider 与 Workflow 通过已完成的持久化协议闭环运行。
+- 基于现有 HTTP/SSE 接口实现项目创建、素材上传、结构化澄清、规划复核、生产进度、页面审阅/编辑、成本与恢复提示、导出下载。
+- UI 必须保持后端事实源，不在浏览器复制 Workflow 状态机；断线后通过 snapshot 与 `Last-Event-ID` 恢复。
+- cloud 模式的 Provider/价格/结果 Host 配置应提供本地设置引导，但密钥不得回显或写入前端持久化状态。
+- 继续保持图片型 PPTX 边界；元素级编辑、画布框选/涂抹、云端多租户仍属于后续阶段。
 
 ## 7. 已知待办与审查结论
 
-- Artifact 维护操作需要由 Workspace 维护锁保护；跨 Store 并发文件移动仍应继续强化测试。
+- Artifact 对账与 GC 已由共享 Workspace 维护锁串行化，并有并发回归测试；未来新增维护任务必须使用同一锁。
 - `artifact_references.project_id` 与 Artifact 项目一致性目前由服务层保证，数据库尚无复合外键。
 - Run 所有权规则仍由应用层注入的 `authorize_run` 实现；本地单用户令牌只提供应用级认证，不能替代资源级校验。
 - Workspace 路径审查裁决：并发换链 TOCTOU 需要已取得同一 OS 用户权限的恶意进程，超出一期威胁模型；静态链接在 I/O 前拒绝，写入/重命名后仍复核。
 - 当前 Windows 测试环境不能创建符号链接；在具备开发者模式或 CI 权限的 Windows 环境中仍需运行 link/junction 用例。
-- Seedream、视觉理解、Renderer、OCR、导出和前端尚未进入实现阶段；Markdown/PDF/图片的受限解析已完成，但扫描 PDF 和图片不会在无 OCR 时产生正文。当前 live Provider 测试只有在显式设置开关及全部 DeepSeek 配置时才会产生真实请求。
-- 当前默认导出的 `app` 仍只提供未配置的应用骨架；实际规划路由通过 `create_app` 显式注入 Runtime、Workflow、Supervisor、认证和资源授权。面向最终用户的环境变量/配置文件启动器应与下一阶段应用配置一起实现。
-- Provider 的 `retryable` 目前只用于能力映射，不自动定时重试；这是为了避免在尚无持久化计时调度器时产生隐式重复费用。已知失败由用户显式重试，计费不确定失败必须先完成恢复或风险确认。
-- 意图是否需要澄清仍由受 Schema 约束的 Brief 决策模型判断；不可信输入边界已改为 JSON 字符串编码并转义闭合标记，但尚未增加领域专用的确定性“信息充分度”规则。
-- Material 当前状态只保存最近一次错误；显式重试会清空该字段。若产品需要展示完整解析尝试历史，应新增版本化 Material Attempt/Event 表，而不是把历史错误塞回当前状态行。
+- React 前端尚未实现；本阶段通过 API 教程与确定性端到端测试验证服务端闭环。
+- `src/ppt_agent/api/app.py` 中的模块级 `app` 仍是无配置骨架，正式运行必须使用 `ppt-agent serve`，它会加载配置并调用完整 composition root。
+- 真实云 smoke test 默认关闭且会产生费用；只有显式设置对应 `LIVE_*` 开关与完整凭据时才运行。正式使用前还应按账号所在区域核对模型 ID、价格和 Seedream 结果 Host allowlist。
+- Windows 子进程解析无法提供 POSIX `rlimit` 同等级资源约束；生产环境优先使用容器/Linux。当前 Windows 账户无符号链接权限，因此 link/junction 用例仍需在 CI 或开发者模式下运行。
+- FastAPI/Starlette 测试依赖目前产生 `httpx`/AnyIO 弃用警告，不影响运行，但升级依赖时应迁移到其建议的新 TestClient/BlockingPortal 接口。
 
 这些待办不能因上下文清理而丢失，也不应在无关模块中顺手实现。
 
