@@ -18,6 +18,10 @@ from ppt_agent.workflows.exporting import ExportFormat, ExportWorkflow
 from ppt_agent.workflows.page_editing import PageEditingWorkflow
 from ppt_agent.workflows.production_service import ProductionCoordinator
 from ppt_agent.workflows.production_store import ProductionStore
+from ppt_agent.workflows.deck_generations import (
+    DeckGenerationConflict,
+    DeckGenerationService,
+)
 
 
 Authorizer = Callable[[str], Awaitable[None]]
@@ -54,6 +58,12 @@ class ExportCreate(BaseModel):
     risk_acknowledgement: str | None = Field(default=None, max_length=1_000)
 
 
+class DeckRegenerateCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    instruction: str = Field(min_length=1, max_length=2_000)
+    expected_generation: int = Field(ge=1)
+
+
 def production_router(
     *,
     coordinator: ProductionCoordinator,
@@ -65,6 +75,7 @@ def production_router(
     authorize_project: Authorizer,
     authorize_run: Authorizer,
     security: LocalHTTPSecurity,
+    deck_generations: DeckGenerationService | None = None,
 ) -> APIRouter:
     router = APIRouter(prefix="/api/v1", dependencies=[Depends(security.authenticate)])
 
@@ -78,8 +89,55 @@ def production_router(
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
+        deck = (
+            await asyncio.to_thread(deck_generations.create_for_run, run_id)
+            if deck_generations is not None
+            else None
+        )
         supervisor.schedule(run_id)
-        return {"run_id": run_id, "status": "queued"}
+        return {
+            "run_id": run_id,
+            "status": "queued",
+            "deck_generation_id": deck.id if deck else None,
+        }
+
+    @router.post("/projects/{project_id}/deck-generations/{generation_id}/regenerate", status_code=status.HTTP_202_ACCEPTED)
+    async def regenerate_deck(
+        project_id: str, generation_id: str, request: DeckRegenerateCreate
+    ) -> dict:
+        if deck_generations is None:
+            raise HTTPException(status_code=503, detail="deck generations are unavailable")
+        try:
+            await authorize_project(project_id)
+            source = await asyncio.to_thread(
+                deck_generations.get, generation_id, project_id=project_id
+            )
+            history = await asyncio.to_thread(deck_generations.list, project_id)
+            lineage = [item for item in history if item.planning_run_id == source.planning_run_id]
+            if not lineage or lineage[-1].generation != request.expected_generation:
+                raise DeckGenerationConflict("deck generation changed; refresh and retry")
+            run_id = await asyncio.to_thread(
+                coordinator.create_from_planning,
+                project_id,
+                source.planning_run_id,
+                request.instruction,
+            )
+            deck = await asyncio.to_thread(
+                deck_generations.create_for_run,
+                run_id,
+                source_generation_id=source.id,
+                instruction=request.instruction,
+            )
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except (ValueError, DeckGenerationConflict) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        supervisor.schedule(run_id)
+        return {
+            "run_id": run_id,
+            "status": "queued",
+            "deck_generation_id": deck.id,
+        }
 
     @router.get("/runs/{run_id}/production")
     async def get_production(run_id: str) -> dict:

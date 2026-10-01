@@ -631,6 +631,36 @@ class ProductionInputRecord(TimestampMixin, Base):
     )
 
 
+class DeckGenerationRecord(TimestampMixin, Base):
+    __tablename__ = "deck_generations"
+    __table_args__ = (
+        UniqueConstraint(
+            "planning_run_id", "generation", name="uq_deck_generation_lineage"
+        ),
+        CheckConstraint("generation >= 1", name="ck_deck_generation_positive"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    planning_run_id: Mapped[str] = mapped_column(
+        ForeignKey("workflow_runs.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    production_run_id: Mapped[str] = mapped_column(
+        ForeignKey("workflow_runs.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    generation: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(String(30), nullable=False)
+    source_generation_id: Mapped[str | None] = mapped_column(
+        ForeignKey("deck_generations.id", ondelete="SET NULL")
+    )
+    instruction: Mapped[str | None] = mapped_column(Text)
+    page_generation_ids: Mapped[list[str]] = mapped_column(
+        JSON, nullable=False, default=list
+    )
+
+
 class PageGenerationRecord(TimestampMixin, Base):
     __tablename__ = "page_generations"
     __table_args__ = (

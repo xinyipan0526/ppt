@@ -280,6 +280,76 @@ class PageEditingWorkflow:
             records = session.scalars(select(PageGenerationRecord).where(PageGenerationRecord.page_id == page_id).order_by(PageGenerationRecord.generation))
             return tuple(GenerationSnapshot(item.id, item.generation, item.status, item.page_image_artifact_id, item.source_generation_id) for item in records)
 
+    def restore_generation(
+        self,
+        page_id: str,
+        source_generation_id: str,
+        *,
+        expected_current_generation_id: str,
+    ) -> GenerationSnapshot:
+        """Restore by copying references into a new immutable page generation."""
+        with session_scope(self._sessions) as session:
+            session.execute(text("BEGIN IMMEDIATE"))
+            page = session.get(PageRecord, page_id)
+            source = session.get(PageGenerationRecord, source_generation_id)
+            if page is None or source is None or source.page_id != page_id:
+                raise LookupError("page generation not found")
+            run = session.get(WorkflowRunRecord, page.run_id)
+            if run is None:
+                raise LookupError("production run not found")
+            for artifact_id in (
+                source.production_spec_artifact_id,
+                source.visual_artifact_id,
+                source.render_manifest_artifact_id,
+                source.dom_report_artifact_id,
+                source.page_image_artifact_id,
+                source.thumbnail_artifact_id,
+                source.quality_artifact_id,
+            ):
+                if artifact_id is None:
+                    continue
+                artifact = self._artifacts.get(artifact_id)
+                if artifact.project_id != run.project_id:
+                    raise ValueError("page generation contains a cross-project Artifact")
+            current = session.scalar(
+                select(PageGenerationRecord)
+                .where(
+                    PageGenerationRecord.page_id == page_id,
+                    PageGenerationRecord.page_image_artifact_id
+                    == page.current_artifact_id,
+                )
+                .order_by(PageGenerationRecord.generation.desc())
+            )
+            if current is None or current.id != expected_current_generation_id:
+                raise ValueError("page generation changed; refresh and retry")
+            number = int(
+                session.scalar(
+                    select(func.max(PageGenerationRecord.generation)).where(
+                        PageGenerationRecord.page_id == page_id
+                    )
+                )
+                or 0
+            ) + 1
+            restored = PageGenerationRecord(
+                id=str(uuid4()), page_id=page_id, generation=number,
+                status="succeeded",
+                production_spec_artifact_id=source.production_spec_artifact_id,
+                visual_artifact_id=source.visual_artifact_id,
+                render_manifest_artifact_id=source.render_manifest_artifact_id,
+                dom_report_artifact_id=source.dom_report_artifact_id,
+                page_image_artifact_id=source.page_image_artifact_id,
+                thumbnail_artifact_id=source.thumbnail_artifact_id,
+                quality_artifact_id=source.quality_artifact_id,
+                source_generation_id=source.id,
+            )
+            session.add(restored)
+            page.current_artifact_id = source.page_image_artifact_id
+            session.flush()
+            return GenerationSnapshot(
+                restored.id, restored.generation, restored.status,
+                restored.page_image_artifact_id, restored.source_generation_id,
+            )
+
     def _page_spec(
         self, source: PageGenerationRecord, page: PageRecord
     ) -> ProductionPageSpecV1:

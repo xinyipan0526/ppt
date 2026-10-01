@@ -18,7 +18,12 @@ class ProductionCoordinator:
         self.production = production
         self.artifacts = artifacts
 
-    def create_from_planning(self, project_id: str, planning_run_id: str) -> str:
+    def create_from_planning(
+        self,
+        project_id: str,
+        planning_run_id: str,
+        regeneration_instruction: str | None = None,
+    ) -> str:
         run = self.planning.repository.get_run(planning_run_id)
         if run.project_id != project_id or run.status.value != "succeeded":
             raise ValueError("planning run must be approved and succeeded")
@@ -31,6 +36,21 @@ class ProductionCoordinator:
             compile_page(PageSpec.model_validate(_payload(self.artifacts.read_bytes(artifact_id))))
             for artifact_id in bundle.page_spec_artifact_ids
         )
+        if regeneration_instruction:
+            pages = tuple(
+                page.model_copy(update={
+                    "visual_regions": tuple(
+                        region.model_copy(update={
+                            "prompt": (
+                                f"{region.prompt or ''}\nGlobal regeneration direction: "
+                                f"{regeneration_instruction}"
+                            ).strip()
+                        })
+                        for region in page.visual_regions
+                    )
+                })
+                for page in pages
+            )
         spec = ProductionSpecV1(
             project_id=project_id, planning_run_id=planning_run_id,
             planning_bundle_artifact_id=bundle_id,

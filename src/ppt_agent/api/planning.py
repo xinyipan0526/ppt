@@ -11,6 +11,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, ConfigDict, Field
 
 from ppt_agent.api.security import InputLimits, LocalHTTPSecurity
+from ppt_agent.artifacts.store import ArtifactStore
 from ppt_agent.domain.materials import ParsedMaterialV1
 from ppt_agent.materials.service import MaterialService
 from ppt_agent.materials.store import MaterialConflict, MaterialNotFound, ResolvedMaterial
@@ -29,6 +30,7 @@ class PlanningSourceTooLarge(ValueError):
 
 class PlanningWorkflow(Protocol):
     store: PlanningStore
+    artifacts: ArtifactStore
 
     async def create_run(
         self,
@@ -202,11 +204,70 @@ def planning_router(
             "bundle_ref": _single_ref(bundle),
         }
 
+    @router.get("/runs/{run_id}/plan-detail", dependencies=authenticated)
+    async def planning_detail(run_id: str) -> dict[str, Any]:
+        await authorize_run(run_id)
+        artifacts = getattr(workflow, "artifacts", None)
+        if artifacts is None:
+            raise HTTPException(status_code=503, detail="planning artifacts are unavailable")
+        try:
+            brief = await asyncio.to_thread(
+                workflow.store.available_stage_output_refs, run_id, "build_brief"
+            )
+            outline = await asyncio.to_thread(
+                workflow.store.available_stage_output_refs, run_id, "build_outline"
+            )
+            design = await asyncio.to_thread(
+                workflow.store.available_stage_output_refs, run_id, "build_design_system"
+            )
+            pages = await asyncio.to_thread(
+                workflow.store.available_stage_output_refs, run_id, "build_page_specs"
+            )
+            bundle = await asyncio.to_thread(
+                workflow.store.available_stage_output_refs, run_id, "review_plan"
+            )
+            return {
+                "run_id": run_id,
+                "brief": _read_planning_payload(artifacts, _single_ref(brief)),
+                "outline": _read_planning_payload(artifacts, _single_ref(outline)),
+                "design_system": _read_planning_payload(artifacts, _single_ref(design)),
+                "pages": [_read_planning_payload(artifacts, item) for item in pages],
+                "bundle_ready": len(bundle) == 1,
+            }
+        except (LookupError, RecordNotFound) as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
     return router
 
 
 def _single_ref(refs: tuple[str, ...]) -> str | None:
     return refs[0] if len(refs) == 1 else None
+
+
+def _read_planning_payload(
+    artifacts: ArtifactStore, artifact_id: str | None
+) -> dict[str, Any] | None:
+    if artifact_id is None:
+        return None
+    value = json.loads(artifacts.read_bytes(artifact_id))
+    if not isinstance(value, dict):
+        raise ValueError("planning artifact must contain a JSON object")
+    payload = value.get("payload", value)
+    if not isinstance(payload, dict):
+        raise ValueError("planning artifact payload must be an object")
+    return _without_internal_artifact_refs(payload)
+
+
+def _without_internal_artifact_refs(value):
+    if isinstance(value, dict):
+        return {
+            key: _without_internal_artifact_refs(item)
+            for key, item in value.items()
+            if not key.endswith(("_artifact_id", "_artifact_ids", "_ref", "_refs"))
+        }
+    if isinstance(value, list):
+        return [_without_internal_artifact_refs(item) for item in value]
+    return value
 
 
 def _compile_planning_sources(

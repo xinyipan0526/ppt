@@ -15,6 +15,7 @@ from ppt_agent.api.projects import projects_router
 from ppt_agent.api.providers import providers_router
 from ppt_agent.api.security import AccessTokenManager, InputLimits, LocalHTTPSecurity, SecretFileTokenStore
 from ppt_agent.api.settings import provider_settings_router
+from ppt_agent.api.workspace import workspace_router
 from ppt_agent.config.provider_secrets import FileProviderSecretStore
 from ppt_agent.config.secrets import WorkspaceTokenStore
 from ppt_agent.config.settings import Settings
@@ -25,6 +26,7 @@ from ppt_agent.runtime.backend import (
     build_material_runtime,
 )
 from ppt_agent.runtime.provider_config import ProviderConfigurationService
+from ppt_agent.workflows.deck_generations import DeckGenerationService
 from ppt_agent.storage.database import session_scope
 from ppt_agent.storage.models import ProjectRecord, WorkflowRunRecord
 
@@ -156,6 +158,7 @@ def build_application(settings: Settings):
         input_limits=limits,
     )
     session_proxy = _Lazy(sessions)
+    deck_generations = _Lazy(lambda: DeckGenerationService(sessions()))
     app.include_router(projects_router(sessions=session_proxy, security=security))
     app.include_router(providers_router(
         resolve_settings=lambda: provider_configuration.settings,
@@ -173,6 +176,16 @@ def build_application(settings: Settings):
         exporting=_Lazy(lambda: dispatcher().exporting),
         artifacts=_Lazy(lambda: runtime.artifacts),
         authorize_project=authorize_project, authorize_run=authorize_run,
+        security=security,
+        deck_generations=deck_generations,
+    ))
+    app.include_router(workspace_router(
+        sessions=session_proxy,
+        artifacts=_Lazy(lambda: runtime.artifacts),
+        decks=deck_generations,
+        editing=_Lazy(lambda: dispatcher().editing),
+        authorize_project=authorize_project,
+        authorize_run=authorize_run,
         security=security,
     ))
     app.include_router(operations_router(
