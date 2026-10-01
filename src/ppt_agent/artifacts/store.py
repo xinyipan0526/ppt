@@ -668,6 +668,10 @@ class ArtifactStore:
             )
 
     def collect_garbage(self, *, before: datetime) -> tuple[str, ...]:
+        with self._workspace_resource_lock("maintenance"):
+            return self._collect_garbage_unlocked(before=before)
+
+    def _collect_garbage_unlocked(self, *, before: datetime) -> tuple[str, ...]:
         collected: list[str] = []
         with session_scope(self._sessions) as session:
             # Serialize the protection recheck and logical delete decision. Files
@@ -720,7 +724,7 @@ class ArtifactStore:
         return tuple(collected)
 
     def reconcile(self) -> ReconciliationReport:
-        with self._workspace_resource_lock("maintenance:reconcile"):
+        with self._workspace_resource_lock("maintenance"):
             return self._reconcile_unlocked()
 
     def _reconcile_unlocked(self) -> ReconciliationReport:

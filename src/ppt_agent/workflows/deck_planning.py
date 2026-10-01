@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from hashlib import sha256
 import json
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Callable, cast
 from uuid import NAMESPACE_URL, uuid5
 
 from ppt_agent.artifacts.store import ArtifactStore, CreateArtifact, EdgeInput
@@ -76,7 +76,7 @@ class DeckPlanningWorkflow:
         store: PlanningStore,
         artifacts: ArtifactStore,
         runner: TextOperationRunner,
-        account_id: str,
+        account_id: str | Callable[[str], str],
         pricing: TextPricing,
         model: str,
         reservation_minor_units: int,
@@ -141,6 +141,8 @@ class DeckPlanningWorkflow:
                     if not self._review(run_id, step):
                         return
             except ProviderCallError as exc:
+                if exc.retryable and exc.confirmed_uncharged:
+                    raise
                 if (
                     exc.code == "unknown_remote_outcome"
                     or (not exc.billing_known and not exc.confirmed_uncharged)
@@ -471,8 +473,11 @@ class DeckPlanningWorkflow:
             request_fingerprint="computed-by-text-runner",
             provider="deepseek",
             model=self._model,
-            account_id=self._account_id,
-            reservation_amount=self._reservation_minor_units,
+            account_id=(self._account_id(run.project_id) if callable(self._account_id) else self._account_id),
+            reservation_amount=max(
+                self._reservation_minor_units,
+                TextOperationRunner.conservative_reservation(request, self._pricing),
+            ),
             currency=self._pricing.currency,
             pricing_version=self._pricing.version,
             idempotency_key=f"{run_id}:{step.stage}:{step.generation}",

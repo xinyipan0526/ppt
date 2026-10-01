@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 from dataclasses import dataclass, replace
+from datetime import UTC, datetime, timedelta
 
 from ppt_agent.ledger.costs import UsageInput
 from ppt_agent.operations.provider import PrepareAttempt, ProviderOperationService
@@ -51,8 +52,17 @@ class ImageOperationRunner:
         fingerprint = request.fingerprint()
         stored = self._operations.get_binary_result(operation.operation_id)
         if stored is not None:
-            if stored.request_fingerprint != fingerprint or stored.result_kind != "base64":
+            if stored.request_fingerprint != fingerprint or stored.result_kind not in {"base64", "url"}:
                 raise ValueError("stored image result identity does not match request")
+            if stored.result_kind == "url":
+                if self._downloader is None:
+                    raise RuntimeError("image result downloader is required for URL results")
+                content, media_type, width, height = await self._downloader.download(stored.result_value)
+                stored = self._operations.complete_binary_download(
+                    operation.operation_id, attempt_id=stored.attempt_id,
+                    encoded_content=base64.b64encode(content).decode("ascii"),
+                    media_type=media_type, dimensions=f"{width}x{height}",
+                )
             content = base64.b64decode(stored.result_value, validate=True)
             width, height = (int(value) for value in stored.usage["dimensions"].split("x"))
             usage = ImageUsage(
@@ -67,7 +77,10 @@ class ImageOperationRunner:
             if exc.usage is not None and exc.billing_known:
                 self._operations.record_charged_failure(prepared.id, self._usage(prepared.id, operation, pricing, exc.usage, request.width, request.height), exc.code, exc.safe_summary)
             elif exc.confirmed_uncharged:
-                self._operations.record_known_failure(prepared.id, error_code=exc.code, confirmed_uncharged=True)
+                self._operations.record_known_failure(
+                    prepared.id, error_code=exc.code, confirmed_uncharged=True,
+                    retry_at=(datetime.now(UTC) + timedelta(seconds=30)) if exc.retryable else None,
+                )
             else:
                 self._operations.begin_recovery(prepared.id)
                 self._operations.mark_outcome_unknown(prepared.id)
@@ -79,7 +92,29 @@ class ImageOperationRunner:
                 self._operations.begin_recovery(prepared.id)
                 self._operations.mark_outcome_unknown(prepared.id)
                 raise RuntimeError("image result downloader is required for URL results")
+            image_usage = {
+                "generated_images": result.usage.generated_images,
+                "output_tokens": result.usage.output_tokens,
+                "input_images": result.usage.input_images,
+                "dimensions": f"{width}x{height}",
+            }
+            self._operations.record_success(
+                prepared.id,
+                self._usage(prepared.id, operation, pricing, result.usage, width, height),
+                result.response_summary,
+                binary_result={
+                    "result_kind": "url", "result_value": result.result_url,
+                    "media_type": media_type, "usage": image_usage,
+                    "download_status": "pending",
+                },
+            )
             content, media_type, width, height = await self._downloader.download(result.result_url)
+            self._operations.complete_binary_download(
+                operation.operation_id, attempt_id=prepared.id,
+                encoded_content=base64.b64encode(content).decode("ascii"),
+                media_type=media_type, dimensions=f"{width}x{height}",
+            )
+            return ImageOperationResult(prepared.id, prepared.operation_id, content, media_type, width, height, result.usage)
         if content is None:
             raise RuntimeError("image Provider returned no durable content")
         image_usage = {
@@ -113,4 +148,3 @@ class ImageOperationRunner:
             dimensions=f"{width}x{height}",
             raw_units={"input_images": usage.input_images},
         )
-

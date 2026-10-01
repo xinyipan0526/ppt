@@ -16,11 +16,13 @@ from ppt_agent.domain.state_machine import PageStatus
 from ppt_agent.rendering.chromium import ChromiumRenderer
 from ppt_agent.rendering.validation import validate_page
 from ppt_agent.providers.image import ImageGenerationResult
+from ppt_agent.domain.vision import QualityReportV1
 from ppt_agent.workflows.artifact_pipeline import commit_bytes
 from ppt_agent.workflows.production_store import ProductionStore
 
 
 VisualGenerator = Callable[[str, int, int], Awaitable[ImageGenerationResult]]
+QualityValidator = Callable[[object, bytes, QualityReportV1], Awaitable[QualityReportV1]]
 
 
 class DeckProductionWorkflow:
@@ -31,11 +33,15 @@ class DeckProductionWorkflow:
         renderer: ChromiumRenderer,
         *,
         visual_generator: VisualGenerator | None = None,
+        quality_validator: QualityValidator | None = None,
+        font_fingerprint: str = "unconfigured",
     ) -> None:
         self.store = store
         self.artifacts = artifacts
         self.renderer = renderer
         self.visual_generator = visual_generator
+        self.quality_validator = quality_validator
+        self.font_fingerprint = font_fingerprint
 
     async def execute(self, run_id: str) -> None:
         spec = self.store.load_spec(run_id)
@@ -70,7 +76,8 @@ class DeckProductionWorkflow:
                 visual_urls[region.id] = f"data:{generated.media_type};base64,{encoded}"
             manifest = RenderManifestV1(
                 page=page, renderer_version="html-css-svg-v1",
-                chromium_version="playwright-managed", font_fingerprint="configured",
+                chromium_version="playwright-managed",
+                font_fingerprint=self.font_fingerprint,
                 visual_artifact_ids=tuple(item.id for item in visual_artifacts),
             )
             manifest_bytes = manifest.model_dump_json().encode()
@@ -107,6 +114,8 @@ class DeckProductionWorkflow:
             )
             self.store.advance_page(snapshot.id, "validation")
             quality = validate_page(page.page_id, rendered.png, rendered.report)
+            if quality.passed and self.quality_validator is not None:
+                quality = await self.quality_validator(page, rendered.png, quality)
             quality_bytes = quality.model_dump_json().encode()
             quality_artifact = commit_bytes(
                 self.artifacts, spec.project_id, f"production/{run_id}/page/{page.page_index}/quality",

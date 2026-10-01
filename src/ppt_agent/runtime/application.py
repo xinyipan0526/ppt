@@ -12,7 +12,7 @@ from sqlalchemy import Engine
 
 from ppt_agent.artifacts.store import ArtifactStore, ReconciliationReport
 from ppt_agent.events.store import WorkflowEventStore
-from ppt_agent.runtime.maintenance import EventRetentionTask
+from ppt_agent.runtime.maintenance import EventRetentionTask, ProviderRetryTask
 from ppt_agent.runtime.recovery import RecoveryCoordinator, RecoveryPlan
 from ppt_agent.runtime.repository import WorkflowRepository
 from ppt_agent.runtime.supervisor import RunExecutor, TaskSupervisor
@@ -100,6 +100,7 @@ class ApplicationRuntime:
         self._material_runtime_factory = material_runtime_factory
         self.capabilities: WorkspaceCapabilities | None = None
         self.engine: Engine | None = None
+        self.sessions: SessionFactory | None = None
         self.repository: WorkflowRepository | None = None
         self.event_store: WorkflowEventStore | None = None
         self.artifacts: ArtifactStore | None = None
@@ -110,6 +111,7 @@ class ApplicationRuntime:
         self.reconciliation_report: ReconciliationReport | None = None
         self._lock: WorkspaceInstanceLock | None = None
         self._retention: EventRetentionTask | None = None
+        self._provider_retries: ProviderRetryTask | None = None
         self._ready = False
 
     @property
@@ -139,6 +141,7 @@ class ApplicationRuntime:
             )
             await asyncio.to_thread(verify_database_integrity, self.engine)
             sessions = create_session_factory(self.engine)
+            self.sessions = sessions
 
             self.artifacts = ArtifactStore(sessions, paths.root)
             self.reconciliation_report = await asyncio.to_thread(
@@ -189,6 +192,10 @@ class ApplicationRuntime:
                 interval=self.config.maintenance_interval,
             )
             self._retention.start()
+            self._provider_retries = ProviderRetryTask(
+                self.repository, self.supervisor
+            )
+            self._provider_retries.start()
             self._ready = True
         except BaseException:
             try:
@@ -203,6 +210,15 @@ class ApplicationRuntime:
         self._ready = False
         interrupted: tuple[str, ...] = ()
         failure: BaseException | None = None
+        if self._provider_retries is not None:
+            try:
+                await self._provider_retries.stop(
+                    timeout=self.config.maintenance_shutdown_timeout
+                )
+            except BaseException as exc:
+                failure = exc
+            finally:
+                self._provider_retries = None
         if self._retention is not None:
             try:
                 await self._retention.stop(
@@ -239,6 +255,7 @@ class ApplicationRuntime:
                 failure = failure or exc
             finally:
                 self.engine = None
+                self.sessions = None
         if self._lock is not None:
             try:
                 await asyncio.to_thread(self._lock.release)

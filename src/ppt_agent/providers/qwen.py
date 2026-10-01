@@ -130,17 +130,13 @@ class QwenVisionProvider(_QwenBase):
 
 class QwenOCRProvider(_QwenBase):
     async def recognize(self, request: OCRRequest) -> OCRResult:
-        prompt = (
-            "Return JSON with full_text and spans. Each span has text, confidence, "
-            "and box [x1,y1,x2,y2] normalized on a 0..1000 canvas."
-        )
+        prompt = "Extract all text from the image. Return only the recognized text without commentary."
         body = {
             "model": request.model,
             "messages": [{"role": "user", "content": [
                 {"type": "image_url", "image_url": {"url": self._image(request.media_type, request.image)}},
                 {"type": "text", "text": prompt},
             ]}],
-            "response_format": {"type": "json_object"},
             "max_tokens": request.max_output_tokens,
             "user": request.user_id,
         }
@@ -148,18 +144,24 @@ class QwenOCRProvider(_QwenBase):
         text, usage, response_id = self._content(payload)
         try:
             value = json.loads(text)
-            spans = []
-            for item in value.get("spans", []):
-                x1, y1, x2, y2 = (float(part) / 1000 for part in item["box"])
-                spans.append(OCRSpanV1(
-                    text=item["text"],
-                    box=NormalizedBoxV1(x=x1, y=y1, width=x2 - x1, height=y2 - y1),
-                    confidence=item.get("confidence"),
-                ))
-            report = OCRReportV1(full_text=value.get("full_text", ""), spans=tuple(spans))
-        except (ValueError, TypeError, KeyError, ValidationError) as exc:
-            raise VisionProviderCallError(
-                "content_rejected", False, True, False, usage,
-                {"reason": "malformed_ocr_output"},
-            ) from exc
+        except json.JSONDecodeError:
+            report = OCRReportV1(full_text=text.strip(), spans=())
+        else:
+            try:
+                if not isinstance(value, dict):
+                    raise TypeError
+                spans = []
+                for item in value.get("spans", []):
+                    x1, y1, x2, y2 = (float(part) / 1000 for part in item["box"])
+                    spans.append(OCRSpanV1(
+                        text=item["text"],
+                        box=NormalizedBoxV1(x=x1, y=y1, width=x2 - x1, height=y2 - y1),
+                        confidence=item.get("confidence"),
+                    ))
+                report = OCRReportV1(full_text=value.get("full_text", ""), spans=tuple(spans))
+            except (ValueError, TypeError, KeyError, ValidationError) as exc:
+                raise VisionProviderCallError(
+                    "content_rejected", False, True, False, usage,
+                    {"reason": "malformed_ocr_output"},
+                ) from exc
         return OCRResult(response_id, report, usage, {"response_id": response_id})

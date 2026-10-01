@@ -9,7 +9,7 @@ import re
 from collections.abc import AsyncIterable, AsyncIterator
 from dataclasses import asdict
 from pathlib import PurePosixPath
-from typing import Any
+from typing import Any, Awaitable, Callable
 from uuid import uuid4
 
 from ppt_agent.api.security import InputLimits
@@ -20,6 +20,10 @@ from ppt_agent.materials.formats import MaterialFormat, sniff_material
 from ppt_agent.materials.parsers import ParseRequest, ParserFailure
 from ppt_agent.materials.store import MaterialSnapshot, MaterialStore
 from ppt_agent.materials.worker import ParserWorker
+from ppt_agent.domain.vision import VisionAnalysisV1
+
+
+ImageAnalyzer = Callable[[str, str, str, str, bytes], Awaitable[VisionAnalysisV1]]
 
 
 class MaterialServiceError(RuntimeError):
@@ -36,11 +40,13 @@ class MaterialService:
         artifacts: ArtifactStore,
         worker: ParserWorker,
         limits: InputLimits,
+        image_analyzer: ImageAnalyzer | None = None,
     ) -> None:
         self.store = store
         self.artifacts = artifacts
         self.worker = worker
         self.limits = limits
+        self.image_analyzer = image_analyzer
         limits_payload = asdict(limits)
         encoded = json.dumps(limits_payload, sort_keys=True, separators=(",", ":")).encode()
         self._limits = {**limits_payload, "limits_fingerprint": f"sha256:{hashlib.sha256(encoded).hexdigest()}"}
@@ -184,6 +190,13 @@ class MaterialService:
                 except ParserFailure:
                     pass
                 raise
+            if parsed.media_type.startswith("image/") and self.image_analyzer is not None:
+                source_content = await asyncio.to_thread(self.artifacts.read_bytes, claimed.source_artifact_id)
+                analysis = await self.image_analyzer(
+                    claimed.id, claimed.project_id, claimed.source_artifact_id,
+                    claimed.media_type, source_content,
+                )
+                parsed = parsed.model_copy(update={"visual_analysis": analysis})
             payload = parsed.model_dump_json(exclude_none=True).encode("utf-8")
             source = await asyncio.to_thread(self.artifacts.get, claimed.source_artifact_id)
             fingerprint_payload = {
@@ -192,6 +205,7 @@ class MaterialService:
                 "parser": [claimed.parser_name, claimed.parser_version],
                 "contract": 1,
                 "limits": claimed.limits_fingerprint,
+                "vision": "vision-analysis-v1" if parsed.visual_analysis is not None else None,
             }
             fingerprint = "sha256:" + hashlib.sha256(
                 json.dumps(fingerprint_payload, sort_keys=True, separators=(",", ":")).encode()

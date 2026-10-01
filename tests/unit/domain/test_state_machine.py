@@ -48,6 +48,7 @@ def test_status_values_match_the_runtime_protocol() -> None:
         "running",
         "waiting_for_budget",
         "waiting_for_user",
+        "waiting_for_retry",
         "recovery_required",
         "cancel_requested",
         "succeeded",
@@ -106,7 +107,10 @@ def test_step_transitions(
     ("current", "event", "expected"),
     [
         (PageStatus.PLANNED, PageEvent.APPROVED, PageStatus.QUEUED),
+        (PageStatus.PLANNED, PageEvent.CANCEL_REQUESTED, PageStatus.CANCEL_REQUESTED),
         (PageStatus.QUEUED, PageEvent.STARTED, PageStatus.RUNNING),
+        (PageStatus.RUNNING, PageEvent.RETRY_SCHEDULED, PageStatus.WAITING_FOR_RETRY),
+        (PageStatus.WAITING_FOR_RETRY, PageEvent.RETRY_DUE, PageStatus.QUEUED),
         (PageStatus.RUNNING, PageEvent.BUDGET_RESERVATION_DENIED, PageStatus.WAITING_FOR_BUDGET),
         (PageStatus.SUCCEEDED, PageEvent.UPSTREAM_INVALIDATED, PageStatus.STALE),
         (PageStatus.STALE, PageEvent.REGENERATION_REQUESTED, PageStatus.QUEUED),
@@ -150,4 +154,3 @@ def test_unsatisfied_guard_is_rejected_before_state_changes() -> None:
             PageEvent.APPROVED,
             guard_satisfied=False,
         )
-

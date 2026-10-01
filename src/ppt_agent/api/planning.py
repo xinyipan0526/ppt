@@ -265,6 +265,7 @@ def _compile_planning_sources(
                     "material_id": parsed.material_id,
                     "media_type": parsed.media_type,
                     "metadata": parsed.metadata.model_dump(mode="json", exclude_none=True),
+                    "visual_analysis": parsed.visual_analysis.model_dump(mode="json") if parsed.visual_analysis else None,
                     "source_artifact_id": parsed.source_artifact_id,
                     "text": "",
                 }

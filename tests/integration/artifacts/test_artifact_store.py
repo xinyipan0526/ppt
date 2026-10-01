@@ -6,6 +6,7 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from threading import Event
 from uuid import uuid4
 
 import pytest
@@ -789,6 +790,45 @@ def test_concurrent_reconciliation_is_workspace_serialized(tmp_path: Path) -> No
 
     assert len(reports) == 2
     assert snapshot.status is ArtifactStatus.DELETED
+
+
+def test_reconciliation_and_gc_share_workspace_maintenance_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store, engine, _project_id = create_store(tmp_path)
+    other = ArtifactStore(create_session_factory(engine), tmp_path / "workspace")
+    reconcile_entered = Event()
+    release_reconcile = Event()
+    gc_entered = Event()
+    original_reconcile = store._reconcile_unlocked
+    original_gc = other._collect_garbage_unlocked
+
+    def blocked_reconcile():
+        reconcile_entered.set()
+        assert release_reconcile.wait(5)
+        return original_reconcile()
+
+    def observed_gc(*, before):
+        gc_entered.set()
+        return original_gc(before=before)
+
+    monkeypatch.setattr(store, "_reconcile_unlocked", blocked_reconcile)
+    monkeypatch.setattr(other, "_collect_garbage_unlocked", observed_gc)
+    try:
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            reconciling = executor.submit(store.reconcile)
+            assert reconcile_entered.wait(5)
+            collecting = executor.submit(
+                other.collect_garbage,
+                before=datetime.now(UTC) + timedelta(minutes=1),
+            )
+            assert not gc_entered.wait(0.2)
+            release_reconcile.set()
+            reconciling.result(timeout=5)
+            collecting.result(timeout=5)
+            assert gc_entered.is_set()
+    finally:
+        engine.dispose()
 
 
 def test_reconcile_cleans_expired_unwritten_staging_file(tmp_path: Path) -> None:

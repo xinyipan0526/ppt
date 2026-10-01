@@ -1,0 +1,18 @@
+services:
+  ppt-agent:
+    build: .
+    ports:
+      - "127.0.0.1:8000:8000"
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      PPT_AGENT_WORKSPACE: /data
+      PPT_AGENT_HOST: 0.0.0.0
+      PPT_AGENT_PORT: 8000
+    volumes:
+      - ppt-agent-data:/data
+    restart: unless-stopped
+
+volumes:
+  ppt-agent-data:

@@ -1,6 +1,7 @@
 """Durable orchestration for one structured text provider submission."""
 
 from dataclasses import dataclass, replace
+from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 import json
 from collections.abc import Callable
@@ -104,6 +105,7 @@ class TextOperationRunner:
                     prepared.id,
                     error_code=exc.code,
                     confirmed_uncharged=True,
+                    retry_at=(datetime.now(UTC) + timedelta(seconds=30)) if exc.retryable else None,
                 )
             else:
                 self._operations.begin_recovery(prepared.id)
@@ -172,6 +174,17 @@ class TextOperationRunner:
             raise ValueError("operation currency must match pricing")
         if operation.pricing_version != pricing.version:
             raise ValueError("operation pricing version must match pricing")
+        maximum = TextOperationRunner.conservative_reservation(request, pricing)
+        if operation.reservation_amount < maximum:
+            raise ValueError(
+                f"reservation must cover conservative maximum of {maximum} minor units"
+            )
+
+    @staticmethod
+    def conservative_reservation(
+        request: StructuredTextRequest, pricing: TextPricing
+    ) -> int:
+        # UTF-8 bytes are a deliberately conservative upper bound on input tokens.
         worst_input_tokens = len(
             (request.system_prompt + request.user_content).encode("utf-8")
         )
@@ -179,13 +192,11 @@ class TextOperationRunner:
             worst_input_tokens * pricing.input_per_million
             + request.max_output_tokens * pricing.output_per_million
         )
-        maximum = (
-            numerator * pricing.safety_factor_millis + 999_999_999
-        ) // 1_000_000_000
-        if operation.reservation_amount < maximum:
-            raise ValueError(
-                f"reservation must cover conservative maximum of {maximum} minor units"
-            )
+        return max(
+            1,
+            (numerator * pricing.safety_factor_millis + 999_999_999)
+            // 1_000_000_000,
+        )
 
     @staticmethod
     def _fingerprint(request: StructuredTextRequest) -> str:

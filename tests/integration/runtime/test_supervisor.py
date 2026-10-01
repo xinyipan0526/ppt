@@ -105,3 +105,31 @@ def test_cancel_requested_run_never_reenters_normal_executor() -> None:
     normal, cancelling = asyncio.run(scenario())
     assert normal == []
     assert len(cancelling) == 1
+
+
+def test_active_run_cancel_executes_durable_cancellation_completion() -> None:
+    async def scenario() -> RunStatus:
+        repository, engine = make_repository()
+        entered = asyncio.Event()
+
+        async def executor(_run_id: str) -> None:
+            entered.set()
+            await asyncio.Event().wait()
+
+        async def cancellation_executor(run_id: str) -> None:
+            repository.complete_cancellation(run_id)
+
+        project = repository.create_project("Supervisor")
+        run = repository.create_run(project, "deck", 1)
+        supervisor = TaskSupervisor(
+            repository, executor, cancellation_executor=cancellation_executor
+        )
+        try:
+            supervisor.schedule(run.id)
+            await entered.wait()
+            assert await supervisor.cancel(run.id)
+            return repository.get_run(run.id).status
+        finally:
+            engine.dispose()
+
+    assert asyncio.run(scenario()) is RunStatus.CANCELLED

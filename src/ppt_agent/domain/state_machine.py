@@ -81,6 +81,7 @@ class PageStatus(StrEnum):
     RUNNING = "running"
     WAITING_FOR_BUDGET = "waiting_for_budget"
     WAITING_FOR_USER = "waiting_for_user"
+    WAITING_FOR_RETRY = "waiting_for_retry"
     RECOVERY_REQUIRED = "recovery_required"
     CANCEL_REQUESTED = "cancel_requested"
     SUCCEEDED = "succeeded"
@@ -96,6 +97,8 @@ class PageEvent(StrEnum):
     BUDGET_INTERRUPT_RESUMED = "budget_interrupt_resumed"
     INTERRUPT_CREATED = "page_interrupt_created"
     INTERRUPT_RESUMED = "page_interrupt_resumed"
+    RETRY_SCHEDULED = "page_retry_scheduled"
+    RETRY_DUE = "page_retry_due"
     COMPLETED = "page_completed"
     UPSTREAM_INVALIDATED = "upstream_invalidated"
     REGENERATION_REQUESTED = "regeneration_requested"
@@ -214,6 +217,8 @@ PAGE_TRANSITIONS: dict[tuple[PageStatus, PageEvent], PageStatus] = {
     ): PageStatus.QUEUED,
     (PageStatus.RUNNING, PageEvent.INTERRUPT_CREATED): PageStatus.WAITING_FOR_USER,
     (PageStatus.WAITING_FOR_USER, PageEvent.INTERRUPT_RESUMED): PageStatus.QUEUED,
+    (PageStatus.RUNNING, PageEvent.RETRY_SCHEDULED): PageStatus.WAITING_FOR_RETRY,
+    (PageStatus.WAITING_FOR_RETRY, PageEvent.RETRY_DUE): PageStatus.QUEUED,
     (PageStatus.RUNNING, PageEvent.COMPLETED): PageStatus.SUCCEEDED,
     (PageStatus.SUCCEEDED, PageEvent.UPSTREAM_INVALIDATED): PageStatus.STALE,
     (PageStatus.STALE, PageEvent.REGENERATION_REQUESTED): PageStatus.QUEUED,
@@ -236,10 +241,12 @@ PAGE_TRANSITIONS: dict[tuple[PageStatus, PageEvent], PageStatus] = {
     (PageStatus.RECOVERY_REQUIRED, PageEvent.RECOVERY_FAILED): PageStatus.FAILED,
 }
 for _page_status in (
+    PageStatus.PLANNED,
     PageStatus.QUEUED,
     PageStatus.RUNNING,
     PageStatus.WAITING_FOR_BUDGET,
     PageStatus.WAITING_FOR_USER,
+    PageStatus.WAITING_FOR_RETRY,
     PageStatus.RECOVERY_REQUIRED,
     PageStatus.STALE,
 ):
@@ -370,4 +377,3 @@ def transition_attempt(
         ATTEMPT_TRANSITIONS,
         guard_satisfied=guard_satisfied,
     )
-

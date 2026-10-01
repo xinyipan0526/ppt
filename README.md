@@ -6,7 +6,9 @@
 
 本项目不是一次性的能力演示。设计目标是构建一个关注生成效果、成本、稳定性、可观测性和可恢复性的生产级本地应用。
 
-> 当前仓库已完成本地持久化/恢复基础设施、DeepSeek 结构化文本适配、可中断的确定性规划闭环，以及 Markdown、PDF、PNG/JPEG/WebP 的受限素材摄取。Seedream/Qwen、确定性页面渲染、导出、OCR 与前端仍待实现；当前可运行范围与恢复检查点以 [AGENTS.md](AGENTS.md) 为准。
+> 当前后端已完整支持可恢复规划、素材解析、DeepSeek/Seedream/Qwen 云调用、确定性排版、视觉/OCR 质检、自然语言单页编辑，以及 PNG/JPG/ZIP/PDF/图片型 PPTX 导出；无 Key 的确定性模式可运行完整闭环。React 前端将在下一阶段实现。进度检查点以 [AGENTS.md](AGENTS.md) 为准。
+
+快速上手：[本机与 Docker 启动](docs/quickstart.md) · [配置参考](docs/configuration.md) · [云 Provider](docs/provider-setup.md) · [HTTP API 教程](docs/api-tutorial.md)
 
 ## 1. 产品定位
 

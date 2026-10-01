@@ -88,6 +88,16 @@ def materials_router(
         material = await _owned(service, project_id, material_id)
         return jsonable_encoder(asdict(material))
 
+    @router.get(
+        "/projects/{project_id}/materials/{material_id}/attempts",
+        dependencies=authenticated,
+    )
+    async def list_material_attempts(project_id: str, material_id: str) -> object:
+        await authorize_project(project_id)
+        await _owned(service, project_id, material_id)
+        attempts = await asyncio.to_thread(service.store.list_attempts, material_id)
+        return jsonable_encoder([asdict(item) for item in attempts])
+
     @router.post(
         "/projects/{project_id}/materials/{material_id}/retry",
         status_code=status.HTTP_202_ACCEPTED,

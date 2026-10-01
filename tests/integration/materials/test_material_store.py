@@ -153,6 +153,11 @@ def test_retry_and_delete_preserve_explicit_transitions(tmp_path: Path) -> None:
 
         assert retried.status is MaterialStatus.PARSING
         assert retried.attempt_count == 2
+        attempts = store.list_attempts(uploaded.id)
+        assert [(item.attempt_no, item.status) for item in attempts] == [
+            (1, "failed"), (2, "failed")
+        ]
+        assert attempts[0].error_detail == "worker exited"
         assert deleted.status is MaterialStatus.DELETED
         with pytest.raises(MaterialConflict):
             store.resolve_ready(project_id, (uploaded.id,))

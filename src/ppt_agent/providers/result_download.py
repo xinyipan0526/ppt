@@ -7,7 +7,7 @@ import ipaddress
 from io import BytesIO
 import socket
 from collections.abc import Callable
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 from PIL import Image, UnidentifiedImageError
@@ -62,12 +62,20 @@ class ResultDownloader:
                 raise ResultDownloadError("result host resolution is invalid") from exc
             if not ip.is_global:
                 raise ResultDownloadError("result host must resolve only to public addresses")
+        pinned_address = addresses[0]
+        authority = f"[{pinned_address}]" if ":" in pinned_address else pinned_address
+        pinned_url = urlunsplit(("https", authority, parsed.path, parsed.query, ""))
         owns = self._client is None
-        client = self._client or httpx.AsyncClient(follow_redirects=False)
+        client = self._client or httpx.AsyncClient(
+            follow_redirects=False, trust_env=False
+        )
         try:
             try:
                 async with client.stream(
-                    "GET", url, timeout=self._timeout, follow_redirects=False
+                    "GET", pinned_url,
+                    headers={"host": host},
+                    extensions={"sni_hostname": host},
+                    timeout=self._timeout, follow_redirects=False,
                 ) as response:
                     if 300 <= response.status_code < 400:
                         raise ResultDownloadError("Provider result redirect is not allowed")

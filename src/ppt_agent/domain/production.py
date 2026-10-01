@@ -60,6 +60,7 @@ class TextBlockV1(ProductionContract):
     max_lines: int = Field(ge=1, le=100)
     language: Literal["zh-CN", "en-US"] = "zh-CN"
     align: Literal["left", "center", "right"] = "left"
+    color: str = Field(default="#111827", pattern=r"^#[0-9A-Fa-f]{6}$")
     allow_truncation: bool = False
 
 
@@ -155,4 +156,3 @@ class DOMLayoutReportV1(ProductionContract):
     page_id: str = Field(min_length=1, max_length=100)
     elements: tuple[LayoutElementReportV1, ...] = Field(default=(), max_length=200)
     network_requests: int = Field(default=0, ge=0)
-

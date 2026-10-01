@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from datetime import UTC, datetime, timedelta
 from typing import TypeVar
 
 from pydantic import BaseModel, ValidationError
@@ -50,7 +51,7 @@ class VisionOperationRunner:
             raise ValueError("operation provider/model must match vision request")
         if operation.currency != pricing.currency or operation.pricing_version != pricing.version:
             raise ValueError("operation pricing must match vision pricing")
-        maximum = (request.max_output_tokens * pricing.output_per_million + len(request.image) * pricing.input_per_million + 999_999) // 1_000_000
+        maximum = conservative_vision_reservation(request.max_output_tokens, len(request.image), pricing)
         if operation.reservation_amount < maximum:
             raise ValueError("reservation must cover conservative vision maximum")
         fingerprint = request.fingerprint()
@@ -69,7 +70,10 @@ class VisionOperationRunner:
             if exc.usage is not None and exc.billing_known:
                 self._operations.record_charged_failure(prepared.id, _usage_input(prepared.id, operation, pricing, exc.usage), exc.code, exc.safe_summary)
             elif exc.confirmed_uncharged:
-                self._operations.record_known_failure(prepared.id, error_code=exc.code, confirmed_uncharged=True)
+                self._operations.record_known_failure(
+                    prepared.id, error_code=exc.code, confirmed_uncharged=True,
+                    retry_at=(datetime.now(UTC) + timedelta(seconds=30)) if exc.retryable else None,
+                )
             else:
                 self._operations.begin_recovery(prepared.id)
                 self._operations.mark_outcome_unknown(prepared.id)
@@ -99,7 +103,7 @@ class OCROperationRunner:
             raise ValueError("operation provider/model must match OCR request")
         if operation.currency != pricing.currency or operation.pricing_version != pricing.version:
             raise ValueError("operation pricing must match OCR pricing")
-        maximum = (request.max_output_tokens * pricing.output_per_million + len(request.image) * pricing.input_per_million + 999_999) // 1_000_000
+        maximum = conservative_vision_reservation(request.max_output_tokens, len(request.image), pricing)
         if operation.reservation_amount < maximum:
             raise ValueError("reservation must cover conservative OCR maximum")
         fingerprint = request.fingerprint()
@@ -119,7 +123,10 @@ class OCROperationRunner:
             if exc.usage is not None and exc.billing_known:
                 self._operations.record_charged_failure(prepared.id, _usage_input(prepared.id, operation, pricing, exc.usage), exc.code, exc.safe_summary)
             elif exc.confirmed_uncharged:
-                self._operations.record_known_failure(prepared.id, error_code=exc.code, confirmed_uncharged=True)
+                self._operations.record_known_failure(
+                    prepared.id, error_code=exc.code, confirmed_uncharged=True,
+                    retry_at=(datetime.now(UTC) + timedelta(seconds=30)) if exc.retryable else None,
+                )
             else:
                 self._operations.begin_recovery(prepared.id)
                 self._operations.mark_outcome_unknown(prepared.id)
@@ -144,4 +151,20 @@ def _usage_input(attempt_id: str, operation: PrepareAttempt, pricing: VisionPric
         estimated_amount=operation.reservation_amount, actual_amount=amount,
         currency=pricing.currency, pricing_version=pricing.version,
         input_tokens=usage.input_tokens, output_tokens=usage.output_tokens,
+    )
+
+
+def conservative_vision_reservation(
+    max_output_tokens: int, image_bytes: int, pricing: VisionPricing
+) -> int:
+    # Providers tokenize images differently. One token per byte is intentionally
+    # conservative and guarantees the SQLite reservation covers reported usage.
+    return max(
+        1,
+        (
+            max_output_tokens * pricing.output_per_million
+            + image_bytes * pricing.input_per_million
+            + 999_999
+        )
+        // 1_000_000,
     )

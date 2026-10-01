@@ -1,4 +1,5 @@
 from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
 
@@ -204,6 +205,55 @@ def test_nonterminal_attempt_blocks_parallel_attempt() -> None:
             service.prepare_attempt(attempt_request(account_id))
     finally:
         engine.dispose()
+
+
+def test_recovered_cancel_requested_attempt_becomes_unknown_and_holds_budget() -> None:
+    service, ledger, engine, account_id = create_services()
+    try:
+        prepared = service.prepare_attempt(attempt_request(account_id))
+        service.commit_submission_intent(prepared.id)
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    "UPDATE provider_attempts SET status = 'cancel_requested' "
+                    "WHERE id = :attempt_id"
+                ),
+                {"attempt_id": prepared.id},
+            )
+
+        cancelled = service.cancel_unresolved(prepared.id)
+        reservation = ledger.get_reservation(prepared.reservation_id)
+        account = ledger.get_account(account_id)
+    finally:
+        engine.dispose()
+
+    assert cancelled.status is AttemptStatus.OUTCOME_UNKNOWN
+    assert reservation.status is ReservationStatus.HELD_UNKNOWN
+    assert account.held_unknown == 300
+
+
+def test_known_uncharged_retry_persists_due_time() -> None:
+    service, _, engine, account_id = create_services()
+    due_at = datetime.now(UTC) + timedelta(minutes=1)
+    try:
+        prepared = service.prepare_attempt(attempt_request(account_id))
+        service.commit_submission_intent(prepared.id)
+        service.record_known_failure(
+            prepared.id,
+            error_code="rate_limited",
+            confirmed_uncharged=True,
+            retry_at=due_at,
+        )
+        with engine.connect() as connection:
+            row = connection.execute(text(
+                "SELECT reason, consumed_at FROM provider_retry_schedules "
+                "WHERE attempt_id = :attempt_id"
+            ), {"attempt_id": prepared.id}).one()
+    finally:
+        engine.dispose()
+
+    assert row.reason == "rate_limited"
+    assert row.consumed_at is None
 
 
 def test_success_settles_attempt_and_selects_it_without_hiding_unknown_history() -> None:

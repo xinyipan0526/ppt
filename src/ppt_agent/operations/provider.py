@@ -21,6 +21,7 @@ from ppt_agent.storage.models import (
     ProviderAttemptRecord,
     ProviderBinaryResultRecord,
     ProviderOperationRecord,
+    ProviderRetryScheduleRecord,
     ProviderRetryAuthorizationRecord,
     ProviderTextResultRecord,
     ProviderVisionResultRecord,
@@ -293,6 +294,44 @@ class ProviderOperationService:
             self._recompute_operation(session, attempt.operation_id)
             return self._attempt_snapshot(attempt)
 
+    def cancel_unresolved(self, attempt_id: str) -> AttemptSnapshot:
+        """Close a locally cancelled attempt without claiming a remote outcome."""
+
+        with session_scope(self._sessions) as session:
+            self._ledger.begin_write_transaction(session)
+            attempt = self._require_attempt(session, attempt_id)
+            if attempt.status is AttemptStatus.PREPARED:
+                attempt.status = transition_attempt(
+                    attempt.status, AttemptEvent.SUBMISSION_ABORTED
+                )
+                attempt.error_code = "cancelled_before_submission"
+                self._ledger.release_in_transaction(session, attempt.reservation_id)
+            elif attempt.status in {
+                AttemptStatus.SUBMITTED,
+                AttemptStatus.PROVIDER_RUNNING,
+                AttemptStatus.RECONCILING,
+            }:
+                attempt.status = transition_attempt(
+                    attempt.status, AttemptEvent.CANCEL_REQUESTED
+                )
+                attempt.status = transition_attempt(
+                    attempt.status, AttemptEvent.CANCEL_OUTCOME_UNKNOWN
+                )
+                attempt.error_code = "cancel_outcome_unknown"
+                self._ledger.hold_unknown_in_transaction(
+                    session, attempt.reservation_id
+                )
+            elif attempt.status is AttemptStatus.CANCEL_REQUESTED:
+                attempt.status = transition_attempt(
+                    attempt.status, AttemptEvent.CANCEL_OUTCOME_UNKNOWN
+                )
+                attempt.error_code = "cancel_outcome_unknown"
+                self._ledger.hold_unknown_in_transaction(
+                    session, attempt.reservation_id
+                )
+            self._recompute_operation(session, attempt.operation_id)
+            return self._attempt_snapshot(attempt)
+
     def record_success(
         self,
         attempt_id: str,
@@ -409,6 +448,42 @@ class ProviderOperationService:
                 record.download_status, record.artifact_id,
             )
 
+    def complete_binary_download(
+        self,
+        operation_id: str,
+        *,
+        attempt_id: str,
+        encoded_content: str,
+        media_type: str,
+        dimensions: str,
+    ) -> StoredBinaryResult:
+        with session_scope(self._sessions) as session:
+            self._ledger.begin_write_transaction(session)
+            operation = self._require_operation(session, operation_id)
+            record = session.get(ProviderBinaryResultRecord, operation_id)
+            if (
+                record is None
+                or operation.selected_attempt_id != attempt_id
+                or record.attempt_id != attempt_id
+                or record.result_kind not in {"url", "base64"}
+            ):
+                raise OperationConflict("selected image result cannot be finalized")
+            if record.result_kind == "base64":
+                if record.result_value != encoded_content:
+                    raise OperationConflict("image download was already finalized differently")
+            else:
+                record.result_kind = "base64"
+                record.result_value = encoded_content
+                record.media_type = media_type
+                record.usage = {**dict(record.usage), "dimensions": dimensions}
+                record.download_status = "stored"
+            session.flush()
+            return StoredBinaryResult(
+                operation.id, record.attempt_id, record.request_fingerprint,
+                record.result_kind, record.result_value, record.media_type,
+                dict(record.usage), record.download_status, record.artifact_id,
+            )
+
     def get_vision_result(self, operation_id: str) -> StoredVisionResult | None:
         with session_scope(self._sessions) as session:
             operation = session.get(ProviderOperationRecord, operation_id)
@@ -430,6 +505,7 @@ class ProviderOperationService:
         *,
         error_code: str,
         confirmed_uncharged: bool,
+        retry_at: datetime | None = None,
     ) -> AttemptSnapshot:
         if not confirmed_uncharged:
             raise OperationConflict(
@@ -444,8 +520,34 @@ class ProviderOperationService:
             attempt.error_code = error_code
             attempt.response_received_at = datetime.now(UTC)
             self._ledger.release_in_transaction(session, attempt.reservation_id)
+            if retry_at is not None:
+                if retry_at.tzinfo is None or retry_at.utcoffset() is None:
+                    raise ValueError("retry_at must be timezone-aware")
+                session.add(ProviderRetryScheduleRecord(
+                    operation_id=attempt.operation_id,
+                    attempt_id=attempt.id,
+                    due_at=retry_at,
+                    reason=error_code,
+                ))
             self._recompute_operation(session, attempt.operation_id)
             return self._attempt_snapshot(attempt)
+
+    def next_retry_due(self, run_id: str) -> datetime | None:
+        with session_scope(self._sessions) as session:
+            due = session.scalar(
+                select(func.min(ProviderRetryScheduleRecord.due_at))
+                .join(
+                    ProviderOperationRecord,
+                    ProviderOperationRecord.id == ProviderRetryScheduleRecord.operation_id,
+                )
+                .where(
+                    ProviderOperationRecord.run_id == run_id,
+                    ProviderRetryScheduleRecord.consumed_at.is_(None),
+                )
+            )
+            if due is not None and (due.tzinfo is None or due.utcoffset() is None):
+                due = due.replace(tzinfo=UTC)
+            return due
 
     def record_charged_failure(
         self,

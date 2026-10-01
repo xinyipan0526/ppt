@@ -50,6 +50,29 @@ def test_result_downloader_rejects_redirect_without_following() -> None:
     assert calls == 1
 
 
+def test_result_downloader_pins_connection_to_validated_address() -> None:
+    seen: list[tuple[str, str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append((request.url.host or "", request.headers["host"], request.extensions["sni_hostname"]))
+        # Validation happens after the request; any image bytes are sufficient
+        # to prove the transport destination used the validated address.
+        return httpx.Response(200, content=b"not-an-image")
+
+    async def scenario() -> None:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            downloader = ResultDownloader(
+                allowed_hosts={"results.example"},
+                resolver=lambda _: ("93.184.216.34",),
+                client=client,
+            )
+            with pytest.raises(ResultDownloadError, match="valid image"):
+                await downloader.download("https://results.example/image.png?token=one")
+
+    asyncio.run(scenario())
+    assert seen == [("93.184.216.34", "results.example", "results.example")]
+
+
 def test_result_downloader_rejects_oversized_body() -> None:
     async def scenario() -> None:
         async with httpx.AsyncClient(

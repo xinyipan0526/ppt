@@ -71,3 +71,23 @@ def test_qwen_ocr_normalizes_positional_spans() -> None:
     assert result.report.full_text == "Hello"
     assert result.report.spans[0].box.x == 0.1
     assert result.report.spans[0].box.width == 0.8
+
+
+def test_qwen_ocr_accepts_official_plain_text_response() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        assert "response_format" not in body
+        return httpx.Response(200, json={
+            "id": "ocr-text", "choices": [{"message": {"content": "Hello\n世界"}}],
+            "usage": {"prompt_tokens": 5, "completion_tokens": 3},
+        })
+
+    async def scenario():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            return await QwenOCRProvider("secret", "https://workspace.example/compatible-mode/v1", client=client).recognize(
+                OCRRequest("qwen-vl-ocr-latest", b"image", "image/png", 100, "user")
+            )
+
+    result = asyncio.run(scenario())
+    assert result.report.full_text == "Hello\n世界"
+    assert result.report.spans == ()

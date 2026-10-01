@@ -9,6 +9,8 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from ppt_agent.domain.vision import VisionAnalysisV1
+
 
 class MaterialStatus(StrEnum):
     UPLOADED = "uploaded"
@@ -103,6 +105,7 @@ class ParsedMaterialV1(MaterialContract):
         default=(), max_length=100
     )
     warnings: tuple[str, ...] = Field(default=(), max_length=1_000)
+    visual_analysis: VisionAnalysisV1 | None = None
     parser_name: str = Field(min_length=1, max_length=100)
     parser_version: str = Field(min_length=1, max_length=50)
     limits_fingerprint: str = Field(min_length=1, max_length=100)

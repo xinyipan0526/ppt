@@ -175,6 +175,20 @@ class ProductionStore:
                 snapshots.append(ProductionPageSnapshot(page.id, page.page_index, page.status, page.page_stage.value if page.page_stage else None, page.current_artifact_id, generation.id))
             return tuple(snapshots)
 
+    def get_page(self, page_id: str) -> tuple[str, ProductionPageSnapshot]:
+        with session_scope(self._sessions) as session:
+            page = session.get(PageRecord, page_id)
+            if page is None:
+                raise LookupError("page not found")
+            generation = session.scalar(select(PageGenerationRecord).where(PageGenerationRecord.page_id == page.id).order_by(PageGenerationRecord.generation.desc()))
+            if generation is None:
+                raise LookupError("page generation not found")
+            return page.run_id, ProductionPageSnapshot(
+                page.id, page.page_index, page.status,
+                page.page_stage.value if page.page_stage else None,
+                page.current_artifact_id, generation.id,
+            )
+
     def generation_artifacts(self, generation_id: str) -> dict[str, str | None]:
         with session_scope(self._sessions) as session:
             generation = session.get(PageGenerationRecord, generation_id)

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from hashlib import sha256
 from io import BytesIO
+import json
 
 from PIL import Image, ImageDraw
 
@@ -13,6 +14,7 @@ from ppt_agent.providers.image import (
     ImageGenerationResult,
     ImageUsage,
 )
+from ppt_agent.providers.text import StructuredTextRequest, StructuredTextResult, TextUsage
 from ppt_agent.providers.vision import (
     OCRRequest,
     OCRResult,
@@ -20,6 +22,148 @@ from ppt_agent.providers.vision import (
     VisionResult,
     VisionUsage,
 )
+
+
+class DeterministicTextProvider:
+    """Generate stable schema-valid planning outputs without network access."""
+
+    async def complete(self, request: StructuredTextRequest) -> StructuredTextResult:
+        try:
+            content = json.loads(request.user_content)
+        except json.JSONDecodeError as exc:
+            raise ValueError("deterministic provider requires JSON user content") from exc
+        title = str(request.json_schema.get("title", ""))
+        if request.schema_name == "brief_decision":
+            value = self._brief(content)
+        elif request.schema_name == "deck_outline":
+            value = self._outline(content)
+        elif request.schema_name == "design_system":
+            value = self._design()
+        elif request.schema_name == "page_specs" and title == "PageSpecPatch":
+            value = self._page_patch(content)
+        elif request.schema_name == "page_specs":
+            value = self._pages(content)
+        else:
+            raise ValueError(f"unsupported deterministic schema: {request.schema_name}")
+        encoded = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        digest = sha256((request.schema_name + encoded).encode()).hexdigest()
+        return StructuredTextResult(
+            response_id=f"det-text-{digest[:24]}", value=value,
+            usage=TextUsage(
+                input_tokens=max(len(request.user_content.encode("utf-8")) // 4, 1),
+                output_tokens=max(len(encoded.encode("utf-8")) // 4, 1),
+            ),
+            response_summary={"response_id": f"det-text-{digest[:24]}", "mode": "deterministic"},
+        )
+
+    @staticmethod
+    def _brief(content: dict) -> dict:
+        raw = str(content.get("normalized_text", "")).strip()
+        compiled_texts: list[str] = []
+        source_summaries: list[str] = []
+        for line in raw.splitlines():
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                compiled_texts = []
+                break
+            if isinstance(record, dict) and record.get("kind") == "typed_user_input" and isinstance(record.get("text"), str):
+                compiled_texts.append(record["text"])
+            elif isinstance(record, dict) and record.get("kind") == "untrusted_source_content":
+                if isinstance(record.get("text"), str) and record["text"].strip():
+                    source_summaries.append(record["text"][:200])
+                elif isinstance(record.get("visual_analysis"), dict) and isinstance(record["visual_analysis"].get("summary"), str):
+                    source_summaries.append(record["visual_analysis"]["summary"][:200])
+        if compiled_texts or source_summaries:
+            raw = " ".join((*compiled_texts, *source_summaries))
+        answers = content.get("clarification_answers") or {}
+        topic = str(answers.get("topic") or raw).strip()[:200]
+        if not topic:
+            return {
+                "kind": "clarification_required", "brief": None,
+                "reason": "缺少演示主题。", "questions": [{
+                    "field": "topic", "question": "这份演示要讲什么主题？",
+                    "reason": "主题用于生成可执行的演示结构。", "input_type": "text",
+                    "options": [], "recommended_value": None, "required": True,
+                }],
+            }
+        if not answers and len(topic) < 5:
+            return {
+                "kind": "clarification_required", "brief": None,
+                "reason": "主题过短，无法可靠判断演示目的和受众。",
+                "questions": [
+                    {
+                        "field": "purpose", "question": "希望这份演示达成什么目的？",
+                        "reason": "目的决定叙事结构和行动建议。", "input_type": "text",
+                        "options": [], "recommended_value": None, "required": True,
+                    },
+                    {
+                        "field": "audience", "question": "主要受众是谁？",
+                        "reason": "受众决定术语、深度和表达方式。", "input_type": "text",
+                        "options": [], "recommended_value": None, "required": True,
+                    },
+                ],
+            }
+        return {
+            "kind": "ready", "brief": {
+                "topic": topic, "purpose": str(answers.get("purpose") or "清晰介绍主题"),
+                "audience": str(answers.get("audience") or "通用受众"),
+                "language": str(answers.get("language") or "zh-CN"),
+                "tone": str(answers.get("tone") or "专业简洁"),
+                "page_count": int(answers.get("page_count") or 8), "aspect_ratio": "16:9",
+                "budget_minor_units": answers.get("budget_minor_units"),
+                "quality": str(answers.get("quality") or "balanced"),
+            }, "reason": None, "questions": [],
+        }
+
+    @staticmethod
+    def _outline(content: dict) -> dict:
+        brief = content["brief"]
+        count = int(brief["page_count"])
+        topic = brief["topic"]
+        objectives = [
+            f"介绍{topic}", f"说明{topic}的背景", f"概览{topic}的核心框架",
+            f"展开{topic}的关键要点", f"展示{topic}的实践路径", f"分析{topic}的价值",
+            f"给出{topic}的行动建议", f"总结{topic}",
+        ]
+        pages = [{"page_index": index, "objective": objectives[(index - 1) % len(objectives)], "section": None} for index in range(1, count + 1)]
+        return {"narrative": f"从背景、框架、实践到行动完整讲述{topic}。", "pages": pages}
+
+    @staticmethod
+    def _design() -> dict:
+        return {
+            "color_palette": ["#0B132B", "#1C2541", "#3A86FF", "#F8FAFC"],
+            "typography": {"heading": "Noto Sans CJK SC", "body": "Noto Sans CJK SC"},
+            "visual_style": "clean geometric editorial", "image_style": "minimal modern illustration without text",
+            "spacing_scale": [8, 16, 24, 40, 64], "prohibited": ["generated text", "watermark"],
+        }
+
+    @classmethod
+    def _pages(cls, content: dict) -> dict:
+        brief, outline = content["brief"], content["outline"]
+        pages = [cls._page(item, brief["topic"], len(outline["pages"])) for item in outline["pages"]]
+        return {"brief_page_count": brief["page_count"], "outline": outline, "pages": pages}
+
+    @classmethod
+    def _page_patch(cls, content: dict) -> dict:
+        outline = content["outline"]
+        indexes = set(content.get("revision", {}).get("page_indexes") or content.get("page_indexes") or [])
+        if not indexes:
+            indexes = {item["page_index"] for item in content.get("current_page_specs", [])}
+        topic = content.get("brief", {}).get("topic", "演示主题")
+        return {"pages": [cls._page(item, topic, len(outline["pages"])) for item in outline["pages"] if item["page_index"] in indexes]}
+
+    @staticmethod
+    def _page(outline_page: dict, topic: str, total: int) -> dict:
+        index = int(outline_page["page_index"])
+        page_type = "cover" if index == 1 else "closing" if index == total else "content"
+        return {
+            "page_index": index, "objective": outline_page["objective"], "page_type": page_type,
+            "title": topic if index == 1 else outline_page["objective"],
+            "body_blocks": [] if index == 1 else [f"要点 {index - 1}", "以清晰、可执行的方式呈现关键信息。"],
+            "layout_intent": "clean title and body", "visual_requirements": [],
+            "source_refs": [], "acceptance_criteria": ["文字清晰", "版式无溢出"],
+        }
 
 
 class DeterministicImageProvider:
@@ -107,4 +251,3 @@ class DeterministicOCRProvider:
             ),
             response_summary={"response_id": response_id, "mode": "deterministic"},
         )
-

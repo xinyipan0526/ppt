@@ -137,6 +137,18 @@ class CostLedger:
         with session_scope(self._sessions) as session:
             return self._account_snapshot(self._require_account(session, account_id))
 
+    def get_project_account(self, project_id: str, stage: str) -> BudgetAccountSnapshot:
+        with session_scope(self._sessions) as session:
+            record = session.scalar(
+                select(BudgetAccountRecord).where(
+                    BudgetAccountRecord.project_id == project_id,
+                    BudgetAccountRecord.stage == stage,
+                )
+            )
+            if record is None:
+                raise LedgerRecordNotFound(f"budget account not found: {project_id}/{stage}")
+            return self._account_snapshot(record)
+
     def reserve(
         self,
         account_id: str,

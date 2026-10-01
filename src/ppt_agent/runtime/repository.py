@@ -27,6 +27,8 @@ from ppt_agent.storage.models import (
     InterruptStatus,
     WorkflowInterruptRecord,
     PageRecord,
+    ProviderOperationRecord,
+    ProviderRetryScheduleRecord,
     WorkflowEventRecord,
     WorkflowRunRecord,
     WorkflowStepRecord,
@@ -120,6 +122,120 @@ class WorkflowRepository:
         with session_scope(self._sessions) as session:
             record = self._require_run(session, run_id)
             return self._run_snapshot(record)
+
+    def complete_cancellation(self, run_id: str) -> RunSnapshot:
+        with session_scope(self._sessions) as session:
+            run = self._require_run(session, run_id)
+            if run.status is RunStatus.CANCELLED:
+                return self._run_snapshot(run)
+            if run.status is not RunStatus.CANCEL_REQUESTED:
+                raise ValueError("run is not awaiting cancellation")
+            for step in session.scalars(
+                select(WorkflowStepRecord).where(WorkflowStepRecord.run_id == run_id)
+            ):
+                if step.status in {StepStatus.SUCCEEDED, StepStatus.FAILED, StepStatus.CANCELLED, StepStatus.SKIPPED}:
+                    continue
+                next_status = transition_step(step.status, StepEvent.CANCEL_REQUESTED)
+                step.status = (
+                    transition_step(next_status, StepEvent.CANCELLATION_COMPLETED)
+                    if next_status is StepStatus.CANCEL_REQUESTED else next_status
+                )
+            for page in session.scalars(
+                select(PageRecord).where(PageRecord.run_id == run_id)
+            ):
+                if page.status in {PageStatus.SUCCEEDED, PageStatus.FAILED, PageStatus.CANCELLED}:
+                    continue
+                next_status = transition_page(page.status, PageEvent.CANCEL_REQUESTED)
+                page.status = (
+                    transition_page(next_status, PageEvent.CANCELLATION_COMPLETED)
+                    if next_status is PageStatus.CANCEL_REQUESTED else next_status
+                )
+            run.status = transition_run(run.status, RunEvent.CANCELLATION_COMPLETED)
+            self._append_event(
+                session, run_id=run_id, event_type="run.cancellation_completed",
+                payload={"status": run.status.value},
+            )
+            return self._run_snapshot(run)
+
+    def schedule_known_retry(self, run_id: str, retry_at: datetime) -> RunSnapshot:
+        """Move active local work to a persisted retry wait state."""
+
+        if retry_at.tzinfo is None or retry_at.utcoffset() is None:
+            raise ValueError("retry_at must be timezone-aware")
+        with session_scope(self._sessions) as session:
+            run = self._require_run(session, run_id)
+            if run.status is not RunStatus.RUNNING:
+                raise ValueError("run is not active")
+            run.status = transition_run(run.status, RunEvent.RETRY_SCHEDULED)
+            run.retry_at = retry_at
+            for step in session.scalars(
+                select(WorkflowStepRecord).where(
+                    WorkflowStepRecord.run_id == run_id,
+                    WorkflowStepRecord.status == StepStatus.RUNNING,
+                )
+            ):
+                step.status = transition_step(step.status, StepEvent.RETRY_SCHEDULED)
+                step.retry_at = retry_at
+            for page in session.scalars(
+                select(PageRecord).where(
+                    PageRecord.run_id == run_id,
+                    PageRecord.status == PageStatus.RUNNING,
+                )
+            ):
+                page.status = transition_page(page.status, PageEvent.RETRY_SCHEDULED)
+            self._append_event(
+                session, run_id=run_id, event_type="run.retry_scheduled",
+                payload={"retry_at": retry_at.isoformat()},
+            )
+            return self._run_snapshot(run)
+
+    def release_due_provider_retries(self, now: datetime | None = None) -> tuple[str, ...]:
+        """Consume due known-failure schedules and queue their workflows once."""
+
+        now = now or datetime.now(UTC)
+        with session_scope(self._sessions) as session:
+            schedules = list(session.scalars(
+                select(ProviderRetryScheduleRecord)
+                .where(
+                    ProviderRetryScheduleRecord.consumed_at.is_(None),
+                    ProviderRetryScheduleRecord.due_at <= now,
+                )
+                .order_by(ProviderRetryScheduleRecord.due_at)
+            ))
+            run_ids: set[str] = set()
+            for schedule in schedules:
+                operation = session.get(ProviderOperationRecord, schedule.operation_id)
+                schedule.consumed_at = now
+                if operation is not None and operation.run_id:
+                    run_ids.add(operation.run_id)
+            queued: list[str] = []
+            for run_id in sorted(run_ids):
+                run = session.get(WorkflowRunRecord, run_id)
+                if run is None or run.status is not RunStatus.WAITING_FOR_RETRY:
+                    continue
+                run.status = transition_run(run.status, RunEvent.RETRY_DUE)
+                run.retry_at = None
+                for step in session.scalars(
+                    select(WorkflowStepRecord).where(
+                        WorkflowStepRecord.run_id == run_id,
+                        WorkflowStepRecord.status == StepStatus.WAITING_FOR_RETRY,
+                    )
+                ):
+                    step.status = transition_step(step.status, StepEvent.RETRY_DUE)
+                    step.retry_at = None
+                for page in session.scalars(
+                    select(PageRecord).where(
+                        PageRecord.run_id == run_id,
+                        PageRecord.status == PageStatus.WAITING_FOR_RETRY,
+                    )
+                ):
+                    page.status = transition_page(page.status, PageEvent.RETRY_DUE)
+                self._append_event(
+                    session, run_id=run_id, event_type="run.retry_due",
+                    payload={"status": run.status.value},
+                )
+                queued.append(run_id)
+            return tuple(queued)
 
     def create_step(
         self,

@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 
 from ppt_agent.domain.state_machine import RunEvent, RunStatus
+
+
+logger = logging.getLogger(__name__)
 from ppt_agent.runtime.repository import WorkflowRepository
 
 
@@ -67,6 +71,8 @@ class TaskSupervisor:
         if task is not None and not task.done():
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
+        if self._cancellation_executor is not None:
+            await self._cancellation_executor(run_id)
         return snapshot.status is RunStatus.CANCEL_REQUESTED
 
     @asynccontextmanager
@@ -120,11 +126,12 @@ class TaskSupervisor:
                 await self._executor(run_id)
         except asyncio.CancelledError:
             raise
-        except Exception:
+        except Exception as exc:
+            logger.exception("workflow executor failed", extra={"run_id": run_id})
             await asyncio.to_thread(
                 self._repository.mark_run_recovery_required,
                 run_id,
-                reason="executor_failed",
+                reason=f"executor_failed:{type(exc).__name__}",
             )
 
     def _finished(self, run_id: str, task: asyncio.Task[None]) -> None:

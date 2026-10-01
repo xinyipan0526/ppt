@@ -17,6 +17,7 @@ from ppt_agent.storage.database import SessionFactory, session_scope
 from ppt_agent.storage.models import (
     ArtifactRecord,
     ArtifactReferenceRecord,
+    MaterialAttemptRecord,
     ProjectRecord,
     SourceMaterialRecord,
 )
@@ -68,6 +69,18 @@ class ResolvedMaterial:
 class MaterialReconciliationReport:
     recovered: tuple[str, ...]
     failed: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class MaterialAttemptSnapshot:
+    id: str
+    material_id: str
+    attempt_no: int
+    status: str
+    error_code: str | None
+    error_detail: str | None
+    parsed_artifact_id: str | None
+    finished_at: datetime | None
 
 
 class MaterialStore:
@@ -171,6 +184,7 @@ class MaterialStore:
                 return None
             record.status = MaterialStatus.PARSING
             record.attempt_count += 1
+            self._create_attempt(session, record)
             self._advance(record)
             session.flush()
             return self._snapshot(record)
@@ -192,6 +206,7 @@ class MaterialStore:
             record.status = MaterialStatus.READY
             record.error_code = None
             record.error_detail = None
+            self._finish_attempt(session, record, "succeeded", parsed_artifact_id=parsed_artifact_id)
             self._advance(record)
             self._ensure_parsed_reference(session, record)
             session.flush()
@@ -211,6 +226,10 @@ class MaterialStore:
             if record.status is not MaterialStatus.PARSING:
                 raise MaterialConflict("only parsing material can fail")
             self._set_failed(record, error_code, safe_detail)
+            self._finish_attempt(
+                session, record, "failed", error_code=error_code.value,
+                error_detail=safe_detail,
+            )
             session.flush()
             return self._snapshot(record)
 
@@ -224,6 +243,7 @@ class MaterialStore:
             record.error_code = None
             record.error_detail = None
             record.attempt_count += 1
+            self._create_attempt(session, record)
             self._advance(record)
             session.flush()
             return self._snapshot(record)
@@ -263,6 +283,16 @@ class MaterialStore:
                 .order_by(SourceMaterialRecord.created_at, SourceMaterialRecord.id)
             )
             return tuple(self._snapshot(record) for record in records)
+
+    def list_attempts(self, material_id: str) -> tuple[MaterialAttemptSnapshot, ...]:
+        with session_scope(self._sessions) as session:
+            self._require(session, material_id)
+            records = session.scalars(
+                select(MaterialAttemptRecord)
+                .where(MaterialAttemptRecord.material_id == material_id)
+                .order_by(MaterialAttemptRecord.attempt_no)
+            )
+            return tuple(self._attempt_snapshot(record) for record in records)
 
     def list_pending(self) -> tuple[MaterialSnapshot, ...]:
         with session_scope(self._sessions) as session:
@@ -324,12 +354,21 @@ class MaterialStore:
                         record.error_code = None
                         record.error_detail = None
                         self._advance(record)
+                        self._finish_attempt(
+                            session, record, "succeeded",
+                            parsed_artifact_id=candidates[0].id,
+                        )
                         self._ensure_parsed_reference(session, record)
                         recovered.append(record.id)
                     else:
                         self._set_failed(
                             record, MaterialErrorCode.PARSER_INTERRUPTED,
                             "parser was interrupted before a result was committed",
+                        )
+                        self._finish_attempt(
+                            session, record, "failed",
+                            error_code=MaterialErrorCode.PARSER_INTERRUPTED.value,
+                            error_detail="parser was interrupted before a result was committed",
                         )
                         failed.append(record.id)
                 elif record.status is MaterialStatus.READY:
@@ -404,6 +443,54 @@ class MaterialStore:
             )
         else:
             existing.artifact_id = record.parsed_artifact_id
+
+    @staticmethod
+    def _create_attempt(session: Session, record: SourceMaterialRecord) -> None:
+        session.add(MaterialAttemptRecord(
+            id=str(uuid4()), material_id=record.id, attempt_no=record.attempt_count,
+            status="parsing", error_code=None, error_detail=None,
+            parsed_artifact_id=None, finished_at=None,
+        ))
+
+    @staticmethod
+    def _finish_attempt(
+        session: Session,
+        record: SourceMaterialRecord,
+        status: str,
+        *,
+        error_code: str | None = None,
+        error_detail: str | None = None,
+        parsed_artifact_id: str | None = None,
+    ) -> None:
+        attempt = session.scalar(
+            select(MaterialAttemptRecord).where(
+                MaterialAttemptRecord.material_id == record.id,
+                MaterialAttemptRecord.attempt_no == record.attempt_count,
+            )
+        )
+        if attempt is None:
+            # Existing databases can contain a parsing row created before attempt
+            # history was introduced. Reconciliation backfills it atomically.
+            attempt = MaterialAttemptRecord(
+                id=str(uuid4()), material_id=record.id,
+                attempt_no=max(record.attempt_count, 1), status=status,
+            )
+            session.add(attempt)
+        attempt.status = status
+        attempt.error_code = error_code
+        attempt.error_detail = error_detail[:500] if error_detail else None
+        attempt.parsed_artifact_id = parsed_artifact_id
+        attempt.finished_at = datetime.now(UTC)
+
+    @staticmethod
+    def _attempt_snapshot(record: MaterialAttemptRecord) -> MaterialAttemptSnapshot:
+        return MaterialAttemptSnapshot(
+            id=record.id, material_id=record.material_id,
+            attempt_no=record.attempt_no, status=record.status,
+            error_code=record.error_code, error_detail=record.error_detail,
+            parsed_artifact_id=record.parsed_artifact_id,
+            finished_at=record.finished_at,
+        )
 
     @staticmethod
     def _snapshot(record: SourceMaterialRecord) -> MaterialSnapshot:

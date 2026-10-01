@@ -36,11 +36,14 @@ class FontRegistry:
             if not root.exists():
                 continue
             for path in sorted(
-                (item for item in root.rglob("*") if item.suffix.casefold() in {".ttf", ".otf"}),
+                (item for item in root.rglob("*") if item.suffix.casefold() in {".ttf", ".otf", ".ttc"}),
                 key=lambda item: str(item).casefold(),
             ):
                 fonts.append(FontFile(path.resolve(), path.name, sha256(path.read_bytes()).hexdigest()))
-        chinese_markers = ("cjk", "hans", "noto sans sc", "sourcehansans", "yahei", "simhei", "simsun")
+        chinese_markers = (
+            "cjk", "hans", "noto sans sc", "notosanssc", "sourcehansans",
+            "yahei", "msyh", "simhei", "simsun",
+        )
         chinese = tuple(item for item in fonts if any(marker in item.name.casefold() for marker in chinese_markers))
         if not chinese:
             raise MissingRequiredFont("no approved Chinese font fallback was found")
@@ -48,4 +51,3 @@ class FontRegistry:
         symbol = tuple(item for item in fonts if "symbol" in item.name.casefold()) or latin
         identity = "\n".join(f"{item.name}:{item.content_hash}" for item in fonts)
         return FontSnapshot(chinese, latin, symbol, f"sha256:{sha256(identity.encode()).hexdigest()}")
-
