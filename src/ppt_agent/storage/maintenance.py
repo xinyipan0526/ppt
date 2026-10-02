@@ -42,7 +42,7 @@ class BackupManifest:
 
 
 def run_migrations(database_path: Path) -> None:
-    repository_root = Path(__file__).resolve().parents[3]
+    repository_root = _repository_root()
     config = Config(str(repository_root / "alembic.ini"))
     config.set_main_option("script_location", str(repository_root / "migrations"))
     config.set_main_option(
@@ -287,7 +287,7 @@ def _validate_manifest(manifest: object) -> None:
         raise DatabaseIntegrityError("backup manifest fields are invalid")
     if manifest["application_version"].split(".", 1)[0] != __version__.split(".", 1)[0]:
         raise DatabaseIntegrityError("backup application version is incompatible")
-    repository_root = Path(__file__).resolve().parents[3]
+    repository_root = _repository_root()
     revision = manifest["schema_revision"]
     revision_files = (repository_root / "migrations" / "versions").glob("*.py")
     if not any(path.stem == revision for path in revision_files):
@@ -306,3 +306,27 @@ def _artifact_inventory(connection: sqlite3.Connection) -> tuple[int, int, str]:
         json.dumps(rows, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
     return len(rows), sum(int(row[3] or 0) for row in rows), digest
+
+
+def _repository_root() -> Path:
+    """Locate migration resources in both source and wheel layouts.
+
+    In a source checkout ``maintenance.py`` is nested under ``src/ppt_agent``;
+    an installed wheel places it directly under ``site-packages/ppt_agent``.
+    The former needs ``parents[3]`` while the latter needs ``parents[2]``.
+    Choose the first candidate that contains the Alembic configuration and
+    version directory so startup never depends on the interpreter's ``Lib``
+    directory layout.
+    """
+
+    module_path = Path(__file__).resolve()
+    for index in (3, 2):
+        candidate = module_path.parents[index]
+        if (candidate / "alembic.ini").is_file() and (
+            candidate / "migrations" / "versions"
+        ).is_dir():
+            return candidate
+    raise FileNotFoundError(
+        "PPT Agent migration resources are missing; reinstall the package "
+        "from a complete source distribution"
+    )
