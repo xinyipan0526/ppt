@@ -22,6 +22,17 @@ py -3.12 -m venv .venv
 & '.\.venv\Scripts\ppt-agent.exe' serve --no-open
 ```
 
+如果命令提示 `ModuleNotFoundError: No module named 'ppt_agent'`，说明虚拟环境中残留了旧的启动器，或上一次安装被中断。先关闭正在运行的 PPT Agent 窗口，再执行一次强制重装：
+
+```powershell
+Get-Process ppt-agent -ErrorAction SilentlyContinue | Stop-Process -Force
+& '.\.venv\Scripts\python.exe' -m pip install --no-cache-dir --force-reinstall .
+& '.\.venv\Scripts\ppt-agent.exe' doctor
+& '.\.venv\Scripts\ppt-agent.exe' serve --no-open
+```
+
+始终使用 `.venv\Scripts\ppt-agent.exe`（或 `.venv\Scripts\python.exe -m ppt_agent.cli`），不要混用系统 Python 环境中的同名命令。
+
 首次运行会创建 `workspace/`，其中包含 SQLite 状态、版本化 Artifact 和本地 Secret。
 不要把该目录提交到 Git。无 API Key 时系统保持确定性模式，仍可完整验证上传、
 澄清、规划、8 页生成、编辑、恢复和导出流程。
