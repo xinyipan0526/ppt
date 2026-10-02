@@ -1,0 +1,9 @@
+:root {
+  color-scheme: dark;
+  --bg: #090b10; --surface: #11141b; --surface-2: #171b24; --surface-3: #202632;
+  --line: #2a303c; --line-soft: #20252f; --text: #f4f4f1; --muted: #969eab;
+  --accent: #e8ff58; --accent-ink: #171b0b; --danger: #ff6b6b; --warning: #ffbd59;
+  --success: #54d98c; --blue: #77a7ff; --radius: 14px; --radius-sm: 9px;
+  --shadow: 0 20px 60px rgb(0 0 0 / .35); --rail: 224px;
+  font-family: Inter, "Noto Sans SC", "Microsoft YaHei", system-ui, sans-serif;
+}

@@ -232,6 +232,12 @@ def planning_router(
                 "outline": _read_planning_payload(artifacts, _single_ref(outline)),
                 "design_system": _read_planning_payload(artifacts, _single_ref(design)),
                 "pages": [_read_planning_payload(artifacts, item) for item in pages],
+                "review_ready": (
+                    len(brief) == 1
+                    and len(outline) == 1
+                    and len(design) == 1
+                    and len(pages) > 0
+                ),
                 "bundle_ready": len(bundle) == 1,
             }
         except (LookupError, RecordNotFound) as exc:

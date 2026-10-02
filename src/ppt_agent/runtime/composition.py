@@ -13,7 +13,7 @@ from ppt_agent.api.operations import operations_router
 from ppt_agent.api.production import production_router
 from ppt_agent.api.projects import projects_router
 from ppt_agent.api.providers import providers_router
-from ppt_agent.api.security import AccessTokenManager, InputLimits, LocalHTTPSecurity, SecretFileTokenStore
+from ppt_agent.api.security import AccessTokenManager, InputLimits, LocalHTTPConfig, LocalHTTPSecurity, SecretFileTokenStore
 from ppt_agent.api.settings import provider_settings_router
 from ppt_agent.api.workspace import workspace_router
 from ppt_agent.config.provider_secrets import FileProviderSecretStore
@@ -27,6 +27,7 @@ from ppt_agent.runtime.backend import (
 )
 from ppt_agent.runtime.provider_config import ProviderConfigurationService
 from ppt_agent.workflows.deck_generations import DeckGenerationService
+from ppt_agent.web import mount_web_app
 from ppt_agent.storage.database import session_scope
 from ppt_agent.storage.models import ProjectRecord, WorkflowRunRecord
 
@@ -49,7 +50,22 @@ def build_application(settings: Settings):
     else:
         store = SecretFileTokenStore(settings.local_access_token_file) if settings.local_access_token_file else WorkspaceTokenStore(settings.workspace)
         token = AccessTokenManager(store).load_or_create()
-    security = LocalHTTPSecurity(token=token)
+    authorities = {
+        f"localhost:{settings.port}", f"127.0.0.1:{settings.port}",
+        f"[::1]:{settings.port}",
+    }
+    if settings.host not in {"0.0.0.0", "::"}:
+        authorities.add(f"{settings.host}:{settings.port}")
+    origins = {f"http://{authority}" for authority in authorities}
+    if not settings.production:
+        origins.update({"http://localhost:5173", "http://127.0.0.1:5173"})
+    security = LocalHTTPSecurity(
+        token=token,
+        config=LocalHTTPConfig(
+            allowed_authorities=frozenset(authorities),
+            allowed_origins=frozenset(origins),
+        ),
+    )
     limits = InputLimits()
     runtime_ref: dict[str, ApplicationRuntime] = {}
 
@@ -200,6 +216,7 @@ def build_application(settings: Settings):
     app.state.provider_configuration = provider_configuration
     app.state.runtime = runtime
     app.state.access_token = token
+    mount_web_app(app)
     return app
 
 

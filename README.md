@@ -1,12 +1,21 @@
 # PPT Agent
 
+> 当前版本已经交付完整的同源 React 产品工作台与生产级后端。安装后运行
+> `ppt-agent serve`，浏览器会自动打开 `http://localhost:8000/`；无需 Node.js。
+> 无 API Key 时使用确定性模式完整试跑，正式使用可在“模型设置”中安全配置
+> DeepSeek、Seedream 与 Qwen。密钥不会进入浏览器存储、数据库、事件或 API 响应。
+
+使用入口：[快速开始](docs/quickstart.md) · [配置说明](docs/configuration.md) ·
+[云 Provider 设置](docs/provider-setup.md) · [产品 UI 教程](docs/ui-guide.md) ·
+[HTTP API](docs/api-tutorial.md)
+
 一个面向个人用户、可在本地运行的开源 PPT 生成 Agent。
 
 用户可以输入文本、Markdown、参考图片或 PDF。系统通过可恢复的 Agent Workflow 完成需求澄清、整套演示文稿规划、视觉风格设计、生成式视觉资产、确定性文字排版、页面合成、质量检查和自然语言局部修改，最终导出逐页图片、ZIP、PDF，以及每页铺满图片的 PPTX。
 
 本项目不是一次性的能力演示。设计目标是构建一个关注生成效果、成本、稳定性、可观测性和可恢复性的生产级本地应用。
 
-> 当前后端已完整支持可恢复规划、素材解析、DeepSeek/Seedream/Qwen 云调用、确定性排版、视觉/OCR 质检、自然语言单页编辑，以及 PNG/JPG/ZIP/PDF/图片型 PPTX 导出；无 Key 的确定性模式可运行完整闭环。React 前端将在下一阶段实现。进度检查点以 [AGENTS.md](AGENTS.md) 为准。
+> 当前产品已完整支持可恢复规划、素材解析、DeepSeek/Seedream/Qwen 云调用、确定性排版、视觉/OCR 质检、自然语言单页编辑，以及 PNG/JPG/ZIP/PDF/图片型 PPTX 导出；无 Key 的确定性模式可运行完整闭环。React 工作台与后端由 FastAPI 同源交付。进度检查点以 [AGENTS.md](AGENTS.md) 为准。
 
 快速上手：[本机与 Docker 启动](docs/quickstart.md) · [配置参考](docs/configuration.md) · [云 Provider](docs/provider-setup.md) · [HTTP API 教程](docs/api-tutorial.md)
 

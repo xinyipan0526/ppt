@@ -1,27 +1,62 @@
-# 配置参考
+# 配置说明
 
-优先级为：命令行参数 > 环境变量 > TOML > 默认值。API Key 只从环境变量或 Secret 文件读取，不接受 TOML 明文配置。`ppt-agent doctor` 输出经过脱敏的最终配置并检查 Chromium。
+配置优先级为：命令行参数 > 环境变量 > TOML > 默认值。浏览器工作台保存的
+Provider 非密钥设置位于 `workspace/config/provider-settings.json`；浏览器提交的密钥
+单独保存在 `workspace/.secrets/providers/`，不会进入 JSON、SQLite、日志、事件或响应。
 
-Provider 密钥既可直接使用 `DEEPSEEK_API_KEY`、`SEEDREAM_API_KEY`、`QWEN_API_KEY`，也可分别使用对应的 `*_API_KEY_FILE` 指向 Docker/Kubernetes Secret 文件。直接环境变量优先于文件；密钥不会进入有效配置输出或日志。
-
-## 核心设置
+## 基础配置
 
 | 配置 | 环境变量 | 默认值 |
 |---|---|---|
 | Workspace | `PPT_AGENT_WORKSPACE` | `./workspace` |
-| 监听地址 | `PPT_AGENT_HOST` / `PPT_AGENT_PORT` | `127.0.0.1:8000` |
-| Provider 模式 | `PPT_AGENT_PROVIDER_MODE` | `deterministic` |
-| 固定访问令牌 | `PPT_AGENT_ACCESS_TOKEN` | 自动生成并持久化 |
-| 全局/项目并发 | `PPT_AGENT_GLOBAL_CONCURRENCY` / `PPT_AGENT_PROJECT_CONCURRENCY` | `4` / `2` |
+| 监听地址 | `PPT_AGENT_HOST` | `127.0.0.1` |
+| 端口 | `PPT_AGENT_PORT` | `8000` |
+| 严格生产探测 | `PPT_AGENT_PRODUCTION` | `false` |
+| 全局并发 | `PPT_AGENT_GLOBAL_CONCURRENCY` | `4` |
+| 单项目并发 | `PPT_AGENT_PROJECT_CONCURRENCY` | `2` |
+| Chromium | `PPT_AGENT_CHROMIUM_EXECUTABLE` | Playwright 管理 |
 
-`production=true` 时 Workspace 必须位于通过能力探测的本地文件系统。SQLite、Artifact 和 Secret 必须放在同一持久化 Workspace；不要放在不支持可靠锁、原子替换或 `fsync` 的网络盘。
+可复制 `config/ppt-agent.example.toml` 后运行：
 
-## 成本单位
+```powershell
+& '.\.venv\Scripts\ppt-agent.exe' --config ppt-agent.toml serve
+```
 
-所有价格是所选货币的最小单位，例如 CNY 的“分”。文本/视觉价格按每百万 token 填写，Seedream 按每张图片填写。cloud 模式拒绝零价格或缺少价格版本的配置，避免真实调用被错误记为免费。改变账号套餐或厂商价格后应更新 `PPT_AGENT_PRICING_VERSION`，历史 Usage 会保留旧版本。
+自定义端口会同步更新 Host、Origin 与同源浏览器安全边界。只支持 localhost 产品
+访问；若使用反向代理或远程部署，必须另行设计 TLS、身份认证和代理信任边界。
 
-服务在远端调用前原子预留保守上限，成功后按 Provider 返回 Usage 结算；结果未知的预留不会自动释放。项目创建请求中的 `budget_minor_units` 是每个阶段账户的硬上限。
+## Provider 配置渠道
 
-## 备份与恢复
+推荐直接在本地 UI 的“模型设置”中填写。也可使用环境变量或 Secret 文件：
 
-停止写入后备份整个 Workspace。应用启动时会迁移数据库、执行完整性检查、对账 Artifact，并只恢复明确可安全重放的工作；`outcome_unknown` 必须通过操作 API 查看并由用户显式授权重试。
+```text
+DEEPSEEK_API_KEY / DEEPSEEK_API_KEY_FILE
+SEEDREAM_API_KEY / SEEDREAM_API_KEY_FILE
+QWEN_API_KEY / QWEN_API_KEY_FILE
+```
+
+进程配置还支持 `PPT_AGENT_*_BASE_URL`、模型 ID、Seedream 结果 Host 白名单和价格。
+完整变量名可参考 `.env.example` 与 `config/ppt-agent.example.toml`。TOML 不接受
+明文 API Key。
+
+## 安全模型
+
+- 浏览器通过 HttpOnly、SameSite=Strict Cookie 建立本地会话，脚本无法读取令牌。
+- POST/PUT/PATCH/DELETE 必须携带内存中的 CSRF Token。
+- 自动化仍可使用 Bearer Token；Bearer 请求不需要 CSRF。
+- API Key 表单提交成功后立即清空，不写入 localStorage、sessionStorage、URL 或查询缓存。
+- Host 与 Origin 必须匹配当前本地端口；未知来源请求会在认证前拒绝。
+- 静态资源与 API 同源，生产不需要 CORS。
+
+## Workspace 与备份
+
+Workspace 必须位于支持排他锁、原子替换、`fsync` 和可靠 SQLite 锁的本地文件系统。
+`production=true` 时，无法分类或不安全的网络文件系统会被拒绝。
+
+停止服务后备份整个 Workspace。启动时系统会自动迁移数据库、检查完整性、对账
+Artifact，并只恢复有明确安全证据的任务。`outcome_unknown` 永不自动重发。
+
+## 价格单位
+
+所有价格使用币种最小单位，例如 CNY 的“分”。文本/视觉价格按百万 Token，
+Seedream 按图片。云模式要求正数价格与非空价格版本，避免真实调用被错误记为免费。

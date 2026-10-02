@@ -40,6 +40,12 @@ def test_no_key_text_to_eight_page_pptx(tmp_path: Path) -> None:
         planning_id = planning_response.json()["run_id"]
         interrupted = _wait_snapshot(client, headers, planning_id, {"waiting_for_user", "failed", "recovery_required"})
         assert interrupted["run"]["status"] == "waiting_for_user", interrupted
+        plan_detail = client.get(
+            f"/api/v1/runs/{planning_id}/plan-detail", headers=headers
+        )
+        assert plan_detail.status_code == 200, plan_detail.text
+        assert plan_detail.json()["review_ready"] is True
+        assert plan_detail.json()["bundle_ready"] is False
         pending = next(item for item in interrupted["interrupts"] if item["status"] == "pending")
         resumed = client.post(
             f"/api/v1/runs/{planning_id}/interrupts/{pending['id']}/resume", headers=headers,

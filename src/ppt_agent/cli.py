@@ -5,7 +5,9 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+import threading
 from typing import Sequence
+import webbrowser
 
 from ppt_agent.config.settings import SettingsError, load_settings
 from ppt_agent.runtime.composition import build_application
@@ -21,6 +23,7 @@ def build_parser() -> argparse.ArgumentParser:
     commands = parser.add_subparsers(dest="command", required=True)
     serve = commands.add_parser("serve")
     serve.add_argument("--reload", action="store_true")
+    serve.add_argument("--no-open", action="store_true")
     doctor = commands.add_parser("doctor")
     doctor.add_argument("--skip-browser-check", action="store_true")
     commands.add_parser("migrate")
@@ -59,7 +62,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0
         import uvicorn
         app = build_application(settings)
-        print(f"Local access token: {app.state.access_token}")
+        url = f"http://localhost:{settings.port}/"
+        print(f"PPT Agent is available at {url}")
+        if not args.no_open:
+            timer = threading.Timer(1.0, webbrowser.open, args=(url,))
+            timer.daemon = True
+            timer.start()
         uvicorn.run(app, host=settings.host, port=settings.port, reload=args.reload)
         return 0
     except (SettingsError, RuntimeError) as exc:

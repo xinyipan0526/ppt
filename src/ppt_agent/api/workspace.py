@@ -108,10 +108,16 @@ def workspace_router(
                     "materials": [
                         {
                             "id": item.id,
-                            "filename": item.filename,
+                            "filename": item.display_name,
                             "media_type": item.media_type,
                             "status": item.status.value,
-                            "error": item.error,
+                            "version": item.version,
+                            "error": (
+                                None if item.error_code is None else {
+                                    "code": item.error_code.value,
+                                    "detail": item.error_detail,
+                                }
+                            ),
                             "created_at": item.created_at,
                         }
                         for item in materials

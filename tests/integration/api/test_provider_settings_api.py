@@ -49,6 +49,10 @@ def test_provider_settings_accept_secrets_without_returning_them(tmp_path: Path)
     assert response.json()["activation"] == "active"
     assert set(response.json()["providers"]) == {"deepseek", "seedream", "qwen"}
     assert all(item["configured"] for item in response.json()["providers"].values())
+    assert status.json()["seedream_result_hosts"] == ["image.example.test"]
+    assert status.json()["pricing_version"] == "ui-2026-10-01"
+    assert status.json()["deepseek_input_per_million"] == 100
+    assert status.json()["qwen_output_per_million"] == 500
     assert not any(secret in combined for secret in payload.values() if isinstance(secret, str) and "secret" in secret)
     assert len(applied) == 1
     assert applied[0].deepseek_api_key == "deepseek-browser-secret"

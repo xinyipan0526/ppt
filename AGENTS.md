@@ -39,7 +39,7 @@ docs/specs/          # 已确认的正式技术协议
 
 ## 3. 已确认且不得擅自回退的架构决策
 
-- Python 3.12、FastAPI、SQLAlchemy 2、Alembic、SQLite；前端计划使用 React。
+- Python 3.12、FastAPI、SQLAlchemy 2、Alembic、SQLite；前端使用 React 19、TypeScript、Vite、TanStack Query。
 - 单进程模块化单体；一个 Workspace 同时只允许一个调度实例。
 - 首版不使用 LangGraph。运行时采用显式状态机、SQLite Checkpoint 和 Interrupt/Resume 协议。
 - 首版不引入独立 Worker、Redis、Celery、RabbitMQ、租约或 heartbeat。
@@ -125,10 +125,14 @@ git status --short
 | `83ab8b7` | 确定性布局、Chromium 渲染和质量验证 |
 | `4eb4938` | 可恢复的生产 Page Pipeline |
 | `fe8f965` | 完整后端服务、编辑/导出/API/CLI/配置/文档与端到端验证 |
+| `107ac5c` | 完整后端交付检查点与使用文档 |
+| `34ca108` | React 产品工作台设计与实施计划 |
+| `9b25d73` | HttpOnly 浏览器会话、CSRF 与安全 Provider 配置 |
+| `bfdb0f6` | 不可变 Deck/Page generation 工作台投影与恢复 API |
 
-截至当前基础设施里程碑：
+截至当前产品里程碑：
 
-- 全量测试为 `372 passed, 5 skipped`；两项跳过来自当前 Windows 账户无法创建符号链接，三项为默认关闭的 DeepSeek、Seedream、Qwen 真实计费测试。
+- Python 全量测试为 `388 passed, 6 skipped`；三项跳过来自当前 Windows 账户无法创建符号链接/目录链接，三项为默认关闭的 DeepSeek、Seedream、Qwen 真实计费测试。React 为 `9 passed`，Chromium 产品 E2E 为 `2 passed`。
 - 事件序号通过 Run 行上的原子 `UPDATE ... RETURNING` 分配。
 - 状态变化与核心事件在同一事务提交。
 - SSE 支持一致快照、`Last-Event-ID`、游标过期和有界批量读取。
@@ -163,15 +167,20 @@ git status --short
 - 原生 `ppt-agent serve|doctor|migrate`、确定性无 Key 模式、cloud 模式、TOML/环境变量/Secret 文件配置、Docker/Compose 和完整 HTTP API 已组合到同一 Runtime。
 - 仅“明确未计费且 retryable”的 Provider 失败会保存 due time 并由单进程调度器恢复；未知结果继续持有预算并要求人工授权。
 - 确定性 API 端到端测试覆盖项目、规划复核、8 页生产、单页编辑、PPTX 导出、下载与 Range；真实 Provider 测试必须显式打开独立开关。
+- React 工作台已同源打包进 Python wheel，覆盖项目创建、素材上传、类型化澄清、逐页规划复核、任务恢复、完整 PPT 画廊、单页重生成、局部编辑、历史恢复、全局重生成和 PPTX/PDF/PNG ZIP/JPG ZIP 导出。
+- 浏览器认证使用 HttpOnly/SameSite=Strict 会话 Cookie 与内存 CSRF Token；API Key 成功提交后清空，禁止进入 localStorage、sessionStorage、URL、Query Cache、DOM、日志和响应。Bearer Token 接口继续保留给自动化客户端。
+- Provider 配置由本地 UI 写入 Workspace Secret 文件和非密钥 JSON；运行时空闲时热切换，忙碌时标记 pending。CLI 不再输出访问令牌，`ppt-agent serve` 默认打开同源 UI。
+- SSE 命名事件驱动工作台刷新，断线后由持久化 snapshot 与有界轮询兜底；浏览器状态不复制后端 Workflow 状态机。
+- 正式构建使用 Node 阶段生成静态资源，运行时不需要 Node.js；wheel 已验证包含 `static/index.html` 与带内容哈希的 CSS/JS。
 
 ## 6. 下一步
 
-后端一期需求已经完成。下一开发批次进入 **React 前端 UI**：
+一期完整产品已经交付。下一开发批次应进入 **发布与真实环境验收**：
 
-- 基于现有 HTTP/SSE 接口实现项目创建、素材上传、结构化澄清、规划复核、生产进度、页面审阅/编辑、成本与恢复提示、导出下载。
-- UI 必须保持后端事实源，不在浏览器复制 Workflow 状态机；断线后通过 snapshot 与 `Last-Event-ID` 恢复。
-- cloud 模式的 Provider/价格/结果 Host 配置应提供本地设置引导，但密钥不得回显或写入前端持久化状态。
-- 继续保持图片型 PPTX 边界；元素级编辑、画布框选/涂抹、云端多租户仍属于后续阶段。
+- 在用户明确授权产生费用后，按账号区域分别运行 DeepSeek、Seedream、Qwen live smoke tests，并记录实际模型 ID、价格单位与结果 Host。
+- 在 Windows 开发者模式和 Linux CI 各跑一次全量套件，补齐当前被权限跳过的链接边界测试。
+- 制作版本化安装包/镜像并执行全新 Workspace 安装、升级、备份恢复和浏览器兼容性验收。
+- 继续保持图片型 PPTX 边界；元素级编辑、画布框选/涂抹、云端多租户仍属于二期，不应混入发布修复。
 
 ## 7. 已知待办与审查结论
 
@@ -180,7 +189,7 @@ git status --short
 - Run 所有权规则仍由应用层注入的 `authorize_run` 实现；本地单用户令牌只提供应用级认证，不能替代资源级校验。
 - Workspace 路径审查裁决：并发换链 TOCTOU 需要已取得同一 OS 用户权限的恶意进程，超出一期威胁模型；静态链接在 I/O 前拒绝，写入/重命名后仍复核。
 - 当前 Windows 测试环境不能创建符号链接；在具备开发者模式或 CI 权限的 Windows 环境中仍需运行 link/junction 用例。
-- React 前端尚未实现；本阶段通过 API 教程与确定性端到端测试验证服务端闭环。
+- React 前端已实现并通过真实 Chromium 确定性闭环；尚未在 Safari/Firefox 与移动端做正式兼容性认证，当前产品定位为桌面浏览器工作台。
 - `src/ppt_agent/api/app.py` 中的模块级 `app` 仍是无配置骨架，正式运行必须使用 `ppt-agent serve`，它会加载配置并调用完整 composition root。
 - 真实云 smoke test 默认关闭且会产生费用；只有显式设置对应 `LIVE_*` 开关与完整凭据时才运行。正式使用前还应按账号所在区域核对模型 ID、价格和 Seedream 结果 Host allowlist。
 - Windows 子进程解析无法提供 POSIX `rlimit` 同等级资源约束；生产环境优先使用容器/Linux。当前 Windows 账户无符号链接权限，因此 link/junction 用例仍需在 CI 或开发者模式下运行。

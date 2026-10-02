@@ -8,3 +8,9 @@ htmlcov/
 
 __pycache__/
 *.py[cod]
+
+web/node_modules/
+web/dist/
+web/test-results/
+web/playwright-report/
+web/*.tsbuildinfo

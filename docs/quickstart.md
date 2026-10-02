@@ -1,39 +1,62 @@
 # 快速开始
 
-## 本机确定性模式
+PPT Agent 是本地优先的单用户产品。服务、React 工作台、SQLite、任务调度与
+Artifact 文件都在同一台机器运行；配置云模型后，资料和生成请求才会发送给对应
+Provider。
 
-确定性模式不需要任何 API Key，可完整运行素材上传、规划澄清、8 页生成、编辑、质量检查和导出，适合验证安装与自动化测试。
+## Windows 本机安装
+
+需要 Python 3.12。最终用户不需要安装 Node.js。
 
 ```powershell
 py -3.12 -m venv .venv
-& '.\.venv\Scripts\pip.exe' install -e ".[dev]"
+& '.\.venv\Scripts\pip.exe' install .
 & '.\.venv\Scripts\playwright.exe' install chromium
 & '.\.venv\Scripts\ppt-agent.exe' doctor
 & '.\.venv\Scripts\ppt-agent.exe' serve
 ```
 
-首次启动会在终端显示本地访问令牌，并保存到 `workspace/.secrets/access-token`。HTTP 请求必须同时满足本地 Host/Origin 检查和 `Authorization: Bearer <token>`。
-
-使用配置文件启动：
+服务启动后会自动打开 `http://localhost:8000/`。若不希望自动打开浏览器：
 
 ```powershell
-Copy-Item config/ppt-agent.example.toml ppt-agent.toml
-& '.\.venv\Scripts\ppt-agent.exe' --config ppt-agent.toml serve
+& '.\.venv\Scripts\ppt-agent.exe' serve --no-open
 ```
 
-数据库迁移通常由启动流程自动执行，也可显式执行：
+首次运行会创建 `workspace/`，其中包含 SQLite 状态、版本化 Artifact 和本地 Secret。
+不要把该目录提交到 Git。无 API Key 时系统保持确定性模式，仍可完整验证上传、
+澄清、规划、8 页生成、编辑、恢复和导出流程。
 
-```powershell
-& '.\.venv\Scripts\ppt-agent.exe' --config ppt-agent.toml migrate
-```
+## 第一次制作 PPT
 
-完整 HTTP 操作见 [API 教程](api-tutorial.md)，云模型配置见 [Provider 配置](provider-setup.md)。
+1. 打开“模型设置”。试用可保持确定性模式；正式生成按
+   [Provider 设置](provider-setup.md)配置三组 Key 和价格。
+2. 回到“项目”，创建项目。
+3. 上传 Markdown、PDF、PNG、JPEG 或 WebP，也可以直接填写创作意图。
+4. 回答必要的澄清问题；在规划复核页修改每一页内容与设计方向。
+5. 批准后等待生成。关闭浏览器不会取消后台任务，重新打开会从 SQLite 恢复。
+6. 在完整 PPT 画廊中点击页面，分别查看交付文字、设计 Prompt、局部修改 Prompt
+   与不可变历史版本。
+7. 使用“全局重生成”创建新的整套版本，或下载图片型 PPTX、PDF、图片 ZIP。
 
 ## Docker
 
+Docker 构建会在独立 Node 阶段编译 React；运行镜像不包含 Node 开发环境。
+
 ```powershell
-Copy-Item .env.example .env
 docker compose up --build
 ```
 
-容器仅映射到宿主机 `127.0.0.1:8000`，状态保存在命名卷 `ppt-agent-data`。访问令牌可通过 `docker compose logs ppt-agent` 查看；正式使用建议在 `.env` 中设置至少 43 字符的 `PPT_AGENT_ACCESS_TOKEN`。
+打开 `http://localhost:8000/`。数据保存在 `ppt-agent-data` Volume。容器仅映射宿主机
+回环地址，不应直接暴露到公网。
+
+## 源码开发
+
+```powershell
+& '.\.venv\Scripts\pip.exe' install -e ".[dev]"
+Set-Location web
+npm install
+npm run dev
+```
+
+Vite 开发服务代理 `/api` 到 `127.0.0.1:8000`。生产使用前执行 `npm run build`，
+并将 `web/dist` 内容同步到 `src/ppt_agent/static`；仓库已提交可直接打包的构建产物。

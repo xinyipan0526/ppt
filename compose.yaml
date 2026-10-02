@@ -10,6 +10,7 @@ services:
       PPT_AGENT_WORKSPACE: /data
       PPT_AGENT_HOST: 0.0.0.0
       PPT_AGENT_PORT: 8000
+      PPT_AGENT_PRODUCTION: "true"
     volumes:
       - ppt-agent-data:/data
     restart: unless-stopped

@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from ppt_agent.cli import main
+from ppt_agent.cli import build_parser, main
 
 
 def test_doctor_and_migrate_work_without_provider_keys(tmp_path: Path, capsys) -> None:
@@ -11,3 +11,9 @@ def test_doctor_and_migrate_work_without_provider_keys(tmp_path: Path, capsys) -
     assert "deterministic" in capsys.readouterr().out
     assert main(["--config", str(config), "migrate"]) == 0
     assert (workspace / "state.db").exists()
+
+
+def test_serve_supports_browser_opt_out() -> None:
+    args = build_parser().parse_args(["serve", "--no-open"])
+    assert args.command == "serve"
+    assert args.no_open is True

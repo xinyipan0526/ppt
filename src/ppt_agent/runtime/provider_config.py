@@ -23,7 +23,14 @@ class ProviderConfigurationSnapshot:
     mode: str
     activation: str
     providers: dict[str, dict[str, object]]
+    seedream_result_hosts: tuple[str, ...]
+    pricing_currency: str
     pricing_version: str
+    deepseek_input_per_million: int
+    deepseek_output_per_million: int
+    seedream_per_image: int
+    qwen_input_per_million: int
+    qwen_output_per_million: int
 
 
 class ProviderConfigurationService:
@@ -64,7 +71,14 @@ class ProviderConfigurationService:
                 }
                 for name, status in sorted(statuses.items())
             },
+            seedream_result_hosts=self._settings.seedream_result_hosts,
+            pricing_currency=self._settings.pricing_currency,
             pricing_version=self._settings.pricing_version,
+            deepseek_input_per_million=self._settings.deepseek_input_per_million,
+            deepseek_output_per_million=self._settings.deepseek_output_per_million,
+            seedream_per_image=self._settings.seedream_per_image,
+            qwen_input_per_million=self._settings.qwen_input_per_million,
+            qwen_output_per_million=self._settings.qwen_output_per_million,
         )
 
     def update(
