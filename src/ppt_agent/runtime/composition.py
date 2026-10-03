@@ -26,6 +26,7 @@ from ppt_agent.runtime.backend import (
     build_material_runtime,
 )
 from ppt_agent.runtime.provider_config import ProviderConfigurationService
+from ppt_agent.providers.registry import AdapterRegistry
 from ppt_agent.workflows.deck_generations import DeckGenerationService
 from ppt_agent.web import mount_web_app
 from ppt_agent.storage.database import session_scope
@@ -87,10 +88,13 @@ def build_application(settings: Settings):
         value = current.planning_workflow
         if not isinstance(value, BackendWorkflowDispatcher) or current.sessions is None:
             raise RuntimeError("backend workflows are not ready")
-        value.reconfigure(candidate)
+        bundle = AdapterRegistry(candidate.ark_api_key).build(
+            provider_configuration.snapshot()
+        )
+        value.reconfigure(candidate, bundle)
         if current.material_runtime is not None:
             current.material_runtime.service.image_analyzer = build_material_image_analyzer(  # type: ignore[attr-defined]
-                current.sessions, candidate
+                current.sessions, candidate, bundle
             )
 
     provider_configuration = ProviderConfigurationService(
@@ -102,15 +106,26 @@ def build_application(settings: Settings):
     )
 
     def workflow_factory(sessions, artifacts, repository):
+        bundle = AdapterRegistry(provider_configuration.settings.ark_api_key).build(
+            provider_configuration.snapshot()
+        )
         return BackendWorkflowDispatcher(
-            sessions, artifacts, repository, provider_configuration.settings
+            sessions,
+            artifacts,
+            repository,
+            provider_configuration.settings,
+            bundle,
         )
 
     def material_factory(sessions, artifacts):
+        bundle = AdapterRegistry(provider_configuration.settings.ark_api_key).build(
+            provider_configuration.snapshot()
+        )
         return build_material_runtime(
             sessions, artifacts, workspace=settings.workspace, limits=limits,
             shutdown_timeout=10.0,
             settings=provider_configuration.settings,
+            provider_bundle=bundle,
         )
 
     runtime: ApplicationRuntime

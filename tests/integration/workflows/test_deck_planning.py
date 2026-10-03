@@ -247,7 +247,7 @@ def planning_outputs(page_count: int = 2) -> list[object]:
     return [BriefDecision(kind="ready", brief=brief), outline, design, pages]
 
 
-def setup_workflow(outputs: list[object]):
+def setup_workflow(outputs: list[object], *, provider_name: str = "deepseek"):
     engine, sessions, store, project_id = setup_store()
     workspace = Path(".cache/test-deck-workflow") / str(uuid4())
     artifacts = ArtifactStore(sessions, workspace)
@@ -259,6 +259,7 @@ def setup_workflow(outputs: list[object]):
         account_id="fake-account",
         pricing=TextPricing("deepseek-v1", "CNY", 1, 1),
         model="deepseek-chat",
+        provider_name=provider_name,
         reservation_minor_units=100,
     )
     return engine, sessions, store, workflow, runner, project_id
@@ -371,6 +372,22 @@ def test_complete_workflow_persists_artifacts_and_requires_approval() -> None:
     assert artifact_count == 7  # brief, outline, design, page source, two pages, bundle
     assert all(request.model == "deepseek-chat" for request in runner.requests)
     assert all(request.user_id == project_id for request in runner.requests)
+
+
+def test_workflow_uses_composed_provider_identity_for_attempts() -> None:
+    engine, _, _, workflow, runner, project_id = setup_workflow(
+        planning_outputs(), provider_name="volcengine_ark"
+    )
+    try:
+        run = asyncio.run(
+            workflow.create_run(project_id=project_id, normalized_text="Roadmap")
+        )
+        asyncio.run(workflow.execute(run.id))
+    finally:
+        engine.dispose()
+
+    assert runner.operations
+    assert all(item.provider == "volcengine_ark" for item in runner.operations)
 
 
 def test_clarification_interrupt_resumes_brief_without_losing_source() -> None:

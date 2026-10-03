@@ -80,6 +80,7 @@ class DeckPlanningWorkflow:
         pricing: TextPricing,
         model: str,
         reservation_minor_units: int,
+        provider_name: str = "deepseek",
     ) -> None:
         self.store = store
         self.artifacts = artifacts
@@ -87,6 +88,7 @@ class DeckPlanningWorkflow:
         self._account_id = account_id
         self._pricing = pricing
         self._model = model
+        self._provider_name = provider_name
         self._reservation_minor_units = reservation_minor_units
         self._clarification = RequestClarificationTool()
 
@@ -471,7 +473,7 @@ class DeckPlanningWorkflow:
             operation_id=self._operation_id(run_id, step),
             operation_kind="text.structured",
             request_fingerprint="computed-by-text-runner",
-            provider="deepseek",
+            provider=self._provider_name,
             model=self._model,
             account_id=(self._account_id(run.project_id) if callable(self._account_id) else self._account_id),
             reservation_amount=max(
