@@ -119,8 +119,28 @@ class ModelCatalog:
         return entry
 
     def public_snapshot(self) -> tuple[dict[str, object], ...]:
-        return tuple(
-            {
+        values = []
+        for entry in self._entries:
+            pricing: dict[str, object]
+            if entry.token_pricing is not None:
+                pricing = {
+                    "currency": entry.token_pricing.currency,
+                    "version": entry.token_pricing.version,
+                    "input_per_million": entry.token_pricing.input_per_million,
+                    "output_per_million": entry.token_pricing.output_per_million,
+                    "cached_input_per_million": entry.token_pricing.cached_input_per_million,
+                }
+            else:
+                assert entry.image_pricing is not None
+                pricing = {
+                    "currency": entry.image_pricing.currency,
+                    "version": entry.image_pricing.version,
+                    "pixel_threshold": entry.image_pricing.pixel_threshold,
+                    "output_up_to_2_61mp": entry.image_pricing.output_up_to_2_61mp,
+                    "output_above_2_61mp": entry.image_pricing.output_above_2_61mp,
+                    "additional_reference_image": entry.image_pricing.additional_reference_image,
+                }
+            values.append({
                 "adapter_id": entry.adapter_id,
                 "model_id": entry.model_id,
                 "display_name": entry.display_name,
@@ -128,19 +148,11 @@ class ModelCatalog:
                 "lifecycle": entry.lifecycle.value,
                 "capabilities": [item.value for item in sorted(entry.capabilities)],
                 "recommended": entry.recommended,
-                "pricing_currency": (
-                    entry.token_pricing.currency
-                    if entry.token_pricing is not None
-                    else entry.image_pricing.currency
-                ),
-                "pricing_version": (
-                    entry.token_pricing.version
-                    if entry.token_pricing is not None
-                    else entry.image_pricing.version
-                ),
-            }
-            for entry in self._entries
-        )
+                "pricing_currency": pricing["currency"],
+                "pricing_version": pricing["version"],
+                "pricing": pricing,
+            })
+        return tuple(values)
 
 
 def _token(input_price: int, output_price: int) -> TokenPricing:

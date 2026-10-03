@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
+
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
@@ -9,6 +11,11 @@ from ppt_agent.api.security import LocalHTTPSecurity
 from ppt_agent.config.provider_secrets import ProviderSecretError
 from ppt_agent.config.settings import SettingsError
 from ppt_agent.runtime.provider_config import ProviderConfigurationService
+from ppt_agent.providers.capabilities import ModelCategory
+from ppt_agent.providers.catalog import ARK_ADAPTER_ID, DEFAULT_MODEL_CATALOG
+
+
+ConnectionTest = Callable[[str, str, str], Awaitable[dict[str, object]]]
 
 
 class ModelRuntimeUpdate(BaseModel):
@@ -21,9 +28,16 @@ class ModelRuntimeUpdate(BaseModel):
 
 
 def provider_settings_router(
-    *, service: ProviderConfigurationService, security: LocalHTTPSecurity
+    *,
+    service: ProviderConfigurationService,
+    security: LocalHTTPSecurity,
+    connection_test: ConnectionTest | None = None,
 ) -> APIRouter:
     router = APIRouter(prefix="/api/v1", dependencies=[Depends(security.authenticate)])
+
+    @router.get("/model-catalog")
+    async def get_model_catalog() -> tuple[dict[str, object], ...]:
+        return DEFAULT_MODEL_CATALOG.public_snapshot()
 
     @router.get("/settings/model-runtime")
     async def get_settings() -> dict[str, object]:
@@ -57,6 +71,51 @@ def provider_settings_router(
             raise HTTPException(status_code=404, detail="adapter not found") from exc
         except ProviderSecretError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @router.post("/adapters/{adapter_id}/test")
+    async def test_adapter(
+        adapter_id: str, request: ModelRuntimeUpdate
+    ) -> dict[str, object]:
+        if adapter_id != ARK_ADAPTER_ID:
+            raise HTTPException(status_code=404, detail="adapter not found")
+        try:
+            DEFAULT_MODEL_CATALOG.require(
+                request.multimodal_model_id, ModelCategory.MULTIMODAL
+            )
+            DEFAULT_MODEL_CATALOG.require(
+                request.image_model_id, ModelCategory.IMAGE
+            )
+            candidate_key = (
+                request.ark_api_key.get_secret_value()
+                if request.ark_api_key is not None
+                else service.secrets.load(ARK_ADAPTER_ID) or service.settings.ark_api_key
+            )
+            if not candidate_key:
+                raise SettingsError("Ark API key is required")
+            if connection_test is None:
+                return {"adapter_id": adapter_id, "status": "configuration_valid"}
+            result = await connection_test(
+                candidate_key,
+                request.multimodal_model_id,
+                request.image_model_id,
+            )
+            return {"adapter_id": adapter_id, **result}
+        except (SettingsError, ValueError, KeyError) as exc:
+            raise HTTPException(
+                status_code=422,
+                detail={"code": "capability_mismatch", "message": str(exc)},
+            ) from exc
+        except Exception as exc:
+            safe_codes = {
+                "authentication_error",
+                "model_unavailable",
+                "capability_mismatch",
+                "unknown_remote_outcome",
+            }
+            code = getattr(exc, "code", "unknown_remote_outcome")
+            if code not in safe_codes:
+                code = "unknown_remote_outcome"
+            raise HTTPException(status_code=502, detail={"code": code}) from exc
 
     @router.api_route("/settings/providers", methods=["GET", "PUT"])
     async def deprecated_provider_settings() -> None:

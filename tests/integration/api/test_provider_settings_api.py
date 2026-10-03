@@ -24,7 +24,16 @@ def _client(tmp_path: Path, *, idle: bool = True):
     )
     security = LocalHTTPSecurity(token="t" * 43)
     app = create_app(security=security)
-    app.include_router(provider_settings_router(service=service, security=security))
+    tested: list[tuple[str, str, str]] = []
+
+    async def connection_test(api_key: str, multimodal: str, image: str):
+        tested.append((api_key, multimodal, image))
+        return {"status": "ok"}
+
+    app.include_router(provider_settings_router(
+        service=service, security=security, connection_test=connection_test
+    ))
+    app.state.tested = tested
     return app, service
 
 
@@ -103,3 +112,55 @@ def test_busy_runtime_reports_pending_and_legacy_endpoint_is_deprecated(
 
     assert response.json()["activation"] == "pending"
     assert legacy.status_code == 410
+
+
+def test_catalog_returns_exact_select_values_and_default_pricing(tmp_path: Path) -> None:
+    app, _ = _client(tmp_path)
+    with TestClient(app, base_url="http://localhost:8000") as client:
+        response = client.get("/api/v1/model-catalog", headers=_headers())
+
+    values = {item["model_id"]: item for item in response.json()}
+    assert response.status_code == 200
+    assert values[MULTIMODAL]["category"] == "multimodal"
+    assert values[MULTIMODAL]["pricing"]["input_per_million"] == 600
+    assert values[IMAGE]["category"] == "image"
+    assert values[IMAGE]["pricing"]["output_up_to_2_61mp"] == 30
+    assert "Doubao Seed 2.1 Pro" not in values
+
+
+def test_connection_test_does_not_mutate_active_secret(tmp_path: Path) -> None:
+    app, service = _client(tmp_path)
+    service.secrets.replace("volcengine_ark", "previous-secret")
+    with TestClient(app, base_url="http://localhost:8000") as client:
+        response = client.post(
+            "/api/v1/adapters/volcengine_ark/test",
+            headers=_headers(origin=True),
+            json={
+                "ark_api_key": "candidate-secret",
+                "multimodal_model_id": MULTIMODAL,
+                "image_model_id": IMAGE,
+            },
+        )
+
+    assert response.status_code == 200
+    assert app.state.tested == [("candidate-secret", MULTIMODAL, IMAGE)]
+    assert service.secrets.load("volcengine_ark") == "previous-secret"
+    assert "candidate-secret" not in response.text
+
+
+def test_credential_delete_returns_runtime_to_deterministic(tmp_path: Path) -> None:
+    app, service = _client(tmp_path)
+    service.update(
+        ark_api_key="ark-browser-secret",
+        multimodal_model_id=MULTIMODAL,
+        image_model_id=IMAGE,
+    )
+    with TestClient(app, base_url="http://localhost:8000") as client:
+        response = client.delete(
+            "/api/v1/adapters/volcengine_ark/credential",
+            headers=_headers(origin=True),
+        )
+
+    assert response.status_code == 200
+    assert response.json()["mode"] == "deterministic"
+    assert response.json()["adapter_status"]["configured"] is False

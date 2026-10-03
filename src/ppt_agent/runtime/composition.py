@@ -27,6 +27,7 @@ from ppt_agent.runtime.backend import (
 )
 from ppt_agent.runtime.provider_config import ProviderConfigurationService
 from ppt_agent.providers.registry import AdapterRegistry
+from ppt_agent.providers.catalog import ARK_BASE_URL
 from ppt_agent.workflows.deck_generations import DeckGenerationService
 from ppt_agent.web import mount_web_app
 from ppt_agent.storage.database import session_scope
@@ -197,7 +198,9 @@ def build_application(settings: Settings):
         connection_tests=_connection_tests(lambda: provider_configuration.settings),
     ))
     app.include_router(provider_settings_router(
-        service=provider_configuration, security=security,
+        service=provider_configuration,
+        security=security,
+        connection_test=_ark_connection_test,
     ))
     app.include_router(production_router(
         coordinator=_Lazy(lambda: dispatcher().production_coordinator),
@@ -257,3 +260,42 @@ def _connection_tests(resolve_settings: Callable[[], Settings]) -> dict[str, Cal
         "seedream": callback("seedream"),
         "qwen": callback("qwen"),
     }
+
+
+class _AdapterConnectionError(RuntimeError):
+    def __init__(self, code: str) -> None:
+        super().__init__(code)
+        self.code = code
+
+
+async def _ark_connection_test(
+    api_key: str, multimodal_model_id: str, image_model_id: str
+) -> dict[str, object]:
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            response = await client.get(
+                f"{ARK_BASE_URL}/models",
+                headers={"authorization": f"Bearer {api_key}"},
+            )
+    except httpx.RequestError as exc:
+        raise _AdapterConnectionError("unknown_remote_outcome") from exc
+    if response.status_code == 401:
+        raise _AdapterConnectionError("authentication_error")
+    if response.status_code in {403, 404}:
+        raise _AdapterConnectionError("model_unavailable")
+    if response.status_code >= 400:
+        raise _AdapterConnectionError("unknown_remote_outcome")
+    try:
+        payload = response.json()
+        data = payload.get("data", [])
+        available = {
+            str(item["id"])
+            for item in data
+            if isinstance(item, dict) and "id" in item
+        }
+    except (TypeError, ValueError) as exc:
+        raise _AdapterConnectionError("capability_mismatch") from exc
+    missing = {multimodal_model_id, image_model_id}.difference(available)
+    if missing:
+        raise _AdapterConnectionError("model_unavailable")
+    return {"status": "ok"}

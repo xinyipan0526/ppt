@@ -30,10 +30,12 @@ def providers_router(
         settings = current()
         return {
             "mode": settings.provider_mode,
-            "providers": {
-                "deepseek": {"configured": settings.provider_mode == "deterministic" or bool(settings.deepseek_api_key), "model": settings.deepseek_model},
-                "seedream": {"configured": settings.provider_mode == "deterministic" or bool(settings.seedream_api_key), "model": settings.seedream_model, "generation": True, "reference_edit": True},
-                "qwen": {"configured": settings.provider_mode == "deterministic" or bool(settings.qwen_api_key), "vision_model": settings.qwen_vision_model, "ocr_model": settings.qwen_ocr_model},
+            "adapters": {
+                "volcengine_ark": {
+                    "configured": settings.provider_mode == "deterministic" or bool(settings.ark_api_key),
+                    "multimodal_model_id": settings.multimodal_model_id,
+                    "image_model_id": settings.image_model_id,
+                },
             },
         }
 
