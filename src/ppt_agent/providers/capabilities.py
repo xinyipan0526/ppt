@@ -14,6 +14,26 @@ class OperationMode(StrEnum):
     ASYNC = "async"
 
 
+class ModelCategory(StrEnum):
+    MULTIMODAL = "multimodal"
+    IMAGE = "image"
+
+
+class ModelLifecycle(StrEnum):
+    STABLE = "stable"
+    EXPERIMENTAL = "experimental"
+    DEPRECATED = "deprecated"
+
+
+class ModelCapability(StrEnum):
+    STRUCTURED_OUTPUT = "structured_output"
+    IMAGE_UNDERSTANDING = "image_understanding"
+    OCR = "ocr"
+    REGION_LOCATION = "region_location"
+    IMAGE_GENERATION = "image_generation"
+    IMAGE_EDITING = "image_editing"
+
+
 class CapabilityModel(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 

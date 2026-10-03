@@ -8,6 +8,7 @@ from ppt_agent.providers.capabilities import (
     ProviderCapabilities,
     ProviderFeatureSupport,
     UnsupportedProviderCapability,
+    ModelCategory,
 )
 
 
@@ -77,3 +78,7 @@ def test_capability_contract_rejects_unknown_fields() -> None:
             }
         )
 
+
+def test_model_category_rejects_unknown_values() -> None:
+    with pytest.raises(ValueError):
+        ModelCategory("text_only")
