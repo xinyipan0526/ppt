@@ -53,9 +53,14 @@ class TextOperationRunner:
         self,
         operations: ProviderOperationService,
         provider: StructuredTextProvider,
+        *,
+        provider_name: str = "deepseek",
     ) -> None:
+        if not provider_name:
+            raise ValueError("provider_name must be non-empty")
         self._operations = operations
         self._provider = provider
+        self._provider_name = provider_name
 
     async def execute(
         self,
@@ -160,14 +165,16 @@ class TextOperationRunner:
             usage=result.usage,
         )
 
-    @staticmethod
     def _validate_configuration(
+        self,
         request: StructuredTextRequest,
         operation: PrepareAttempt,
         pricing: TextPricing,
     ) -> None:
-        if operation.provider != "deepseek":
-            raise ValueError("structured text operation provider must be deepseek")
+        if operation.provider != self._provider_name:
+            raise ValueError(
+                "structured text operation provider must match the configured provider"
+            )
         if operation.model != request.model:
             raise ValueError("operation model must match request model")
         if operation.currency != pricing.currency:

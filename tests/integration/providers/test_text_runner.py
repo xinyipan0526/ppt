@@ -262,3 +262,25 @@ def test_runner_rejects_reservation_below_conservative_maximum() -> None:
         engine.dispose()
 
     assert provider.calls == 0
+
+
+def test_runner_accepts_an_injected_provider_name() -> None:
+    engine, _, service, account_id = setup_services()
+    provider = FakeProvider(success())
+    ark_operation = replace(operation(account_id), provider="volcengine_ark")
+    try:
+        result = asyncio.run(
+            TextOperationRunner(
+                service, provider, provider_name="volcengine_ark"
+            ).execute(
+                request=request(),
+                output_type=PresentationBrief,
+                operation=ark_operation,
+                pricing=PRICING,
+            )
+        )
+    finally:
+        engine.dispose()
+
+    assert result.output.topic == "Roadmap"
+    assert provider.calls == 1
