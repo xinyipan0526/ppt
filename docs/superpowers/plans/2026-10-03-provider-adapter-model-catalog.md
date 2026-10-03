@@ -16,6 +16,7 @@
 - Do not touch or commit the untracked `workspace/` directory.
 - Only `api_key`, `multimodal_model_id`, and `image_model_id` are required user inputs.
 - First-party IDs are `doubao-seed-2-1-pro-260915`, `doubao-seed-2-1-lite-260915`, experimental `deepseek-v4-1-flash-260910`, and `doubao-seedream-5-0-pro-260628`.
+- The exact `model_id` string is the only persisted and submitted model identity; UI labels and internal `catalog_id` values must never be accepted in `multimodal_model_id` or `image_model_id`.
 - The only first-release adapter is `volcengine_ark`, using `https://ark.cn-beijing.volces.com/api/v3`.
 - A cloud runtime requires one production-qualified multimodal model and one production-qualified image model; Qwen is not required.
 - API keys must not enter responses, SQLite, events, logs, URLs, browser storage, or query cache.
@@ -47,9 +48,9 @@
 - Produces: `DEFAULT_MODEL_CATALOG: ModelCatalog`, `ModelCatalog.require(model_id: str, category: ModelCategory, *, allow_experimental: bool = False) -> ModelCatalogEntry`, and `ModelCatalog.public_snapshot() -> tuple[dict[str, object], ...]`.
 - Consumes: existing `ProviderCapabilities` request-limit structures where useful; no Workflow imports.
 
-- [ ] **Step 1: Write catalog tests that pin IDs, categories, capabilities, recommendation status, lifecycle, endpoint, result hosts, unique IDs, and non-negative exact pricing values.**
+- [ ] **Step 1: Write catalog tests that pin exact model IDs, categories, capabilities, recommendation status, lifecycle, endpoint, result hosts, unique IDs, and non-negative exact pricing values.**
 
-  Include `test_catalog_rejects_wrong_category_and_experimental_selection`, asserting that Seedream cannot satisfy `multimodal` and DeepSeek V4.1 Flash is rejected unless `allow_experimental=True`.
+  Include `test_catalog_rejects_wrong_category_and_experimental_selection`, asserting that Seedream cannot satisfy `multimodal` and DeepSeek V4.1 Flash is rejected unless `allow_experimental=True`. Include `test_catalog_rejects_labels_aliases_and_case_variants`, asserting that `Doubao Seed 2.1 Pro`, `doubao-seed-2.1-pro`, `DOUBAO-SEED-2-1-PRO-260915`, and internal catalog IDs are rejected.
 
 - [ ] **Step 2: Run the catalog tests and verify they fail because `providers.catalog` does not exist.**
 
@@ -164,7 +165,7 @@
 
 - [ ] **Step 1: Write failing tests for one-key qualification, missing-field deterministic fallback, wrong-category/experimental rejection, old-file migration, old-secret preservation, atomic secret rollback, pending activation, and redacted snapshots.**
 
-  Include a failure injected after candidate secret replacement and assert both the previous secret value and active snapshot are unchanged.
+  Include a failure injected after candidate secret replacement and assert both the previous secret value and active snapshot are unchanged. Assert persisted JSON contains exactly `doubao-seed-2-1-pro-260915` and `doubao-seedream-5-0-pro-260628`, not display labels or catalog IDs.
 
 - [ ] **Step 2: Run configuration tests and verify they fail against the fixed three-provider schema.**
 
@@ -262,13 +263,15 @@
 
 - [ ] **Step 5: Write failing React tests for one password field, two catalog dropdowns, recommended defaults, optional advanced section, submit/clear behavior, safe errors, and absence of browser-storage writes.**
 
+  Assert the visible labels are friendly names while the two submitted values are exactly `doubao-seed-2-1-pro-260915` and `doubao-seedream-5-0-pro-260628`.
+
 - [ ] **Step 6: Run React tests and verify they fail against the old three-key/price form.**
 
   Run: `npm test -- --run web/src/features/settings/ProviderSetup.test.tsx` from `web`; if Vitest rejects the repo-relative path, run `npm test -- ProviderSetup.test.tsx`.
 
 - [ ] **Step 7: Implement the three-field settings experience and updated API contracts.**
 
-  The primary form contains only Ark API Key, multimodal select, image select, and “测试并启用”. Advanced controls are optional and collapsed; no price or host field appears in the normal form.
+  The primary form contains only Ark API Key, multimodal select, image select, and “测试并启用”. Each option displays `display_name` and uses the exact `model_id` as its value. Advanced controls are optional and collapsed; no price or host field appears in the normal form.
 
 - [ ] **Step 8: Run React tests and type checking.**
 

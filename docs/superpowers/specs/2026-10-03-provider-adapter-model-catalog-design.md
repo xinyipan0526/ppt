@@ -61,7 +61,7 @@ Workflow 只依赖能力，不识别厂商或模型名称。现有细粒度协�
 
 每个目录项包含：
 
-- 稳定的 `catalog_id`
+- 仅供代码内部使用的稳定 `catalog_id`
 - `adapter_id`
 - 提交给远端的精确 `model_id`
 - 展示名称和推荐状态
@@ -73,6 +73,18 @@ Workflow 只依赖能力，不识别厂商或模型名称。现有细粒度协�
 - 允许的 endpoint 与图片结果 Host
 
 Workflow 不根据名称推断能力。实验模型只有通过契约测试后才可声明生产能力。
+
+`model_id` 是配置与调用的唯一外部身份。下拉框的 `value`、HTTP 请求、
+`provider-settings.json` 和最终方舟请求都必须原样使用以下精确字符串：
+
+- `doubao-seed-2-1-pro-260915`
+- `doubao-seed-2-1-lite-260915`
+- `deepseek-v4-1-flash-260910`
+- `doubao-seedream-5-0-pro-260628`
+
+展示名称（例如“Doubao Seed 2.1 Pro”）和内部 `catalog_id` 不得写入
+`multimodal_model_id` 或 `image_model_id`。后端不接受点号别名、大小写变体、展示名或
+未知 ID，也不对它们做猜测性转换。
 
 ## 配置与 Secret
 
@@ -120,6 +132,9 @@ workspace/.secrets/adapters/volcengine_ark.key
 - “测试并启用”按钮。
 
 界面不展示或要求用户理解 Token 单价、图片单价、价格版本、结果 Host、Base URL、Region 或 Qwen Key。高级设置默认折叠，全部可留空。
+
+下拉框显示友好名称，但其 option value 必须分别是目录返回的精确 `model_id`。编辑
+指定文件 JSON 时也使用同一精确值，不提供另一套别名格式。
 
 保存流程：
 
