@@ -8,7 +8,14 @@ from ppt_agent.ledger.costs import CostLedger
 from ppt_agent.operations.image_runner import ImageOperationRunner, ImagePricing
 from ppt_agent.operations.provider import PrepareAttempt, ProviderOperationService
 from ppt_agent.providers.deterministic import DeterministicImageProvider
-from ppt_agent.providers.image import ImageGenerationRequest, ImageGenerationResult, ImageUsage
+from ppt_agent.providers.image import (
+    ImageGenerationRequest,
+    ImageGenerationResult,
+    ImageInput,
+    ImageUsage,
+)
+from ppt_agent.providers.catalog import DEFAULT_MODEL_CATALOG
+from ppt_agent.providers.capabilities import ModelCategory
 from ppt_agent.storage.database import DatabaseConfig, create_session_factory, create_sqlite_engine, session_scope
 from ppt_agent.storage.models import Base, ProjectRecord
 
@@ -98,3 +105,66 @@ def test_url_result_is_settled_before_download_and_replayed_without_resubmission
     assert result.content == b"png-bytes"
     assert provider.calls == 1
     assert ledger.get_account(account.id).settled == 10
+
+
+def test_tiered_usage_is_reserved_and_settled_with_reference_charges() -> None:
+    path = Path(".cache/test-image-runner") / f"{uuid4()}.db"
+    engine = create_sqlite_engine(DatabaseConfig(path=path))
+    Base.metadata.create_all(engine)
+    sessions = create_session_factory(engine)
+    project_id = str(uuid4())
+    with session_scope(sessions) as session:
+        session.add(ProjectRecord(id=project_id, name="Tiered image"))
+    ledger = CostLedger(sessions)
+    account = ledger.create_account(project_id, "visual", "CNY", 1000)
+    operations = ProviderOperationService(sessions)
+    model = "doubao-seedream-5-0-pro-260628"
+    request = ImageGenerationRequest(
+        model,
+        "blue",
+        2560,
+        1440,
+        "user",
+        reference_images=tuple(
+            ImageInput(f"ref-{index}", "image/png", b"image", 100, 100)
+            for index in range(3)
+        ),
+    )
+    entry = DEFAULT_MODEL_CATALOG.require(model, ModelCategory.IMAGE)
+    assert entry.image_pricing is not None
+    pricing = ImagePricing.from_schedule(entry.image_pricing)
+    operation = PrepareAttempt(
+        "tiered-op",
+        "image.generate",
+        "placeholder",
+        "volcengine_ark",
+        model,
+        account.id,
+        pricing.reserve(request),
+        "CNY",
+        pricing.version,
+        "tiered-key",
+    )
+
+    class Provider:
+        async def generate(self, request):
+            return ImageGenerationResult(
+                "remote-tiered",
+                "image/png",
+                2560,
+                1440,
+                ImageUsage(generated_images=1, input_images=3),
+                {},
+                content=b"png-bytes",
+            )
+
+    try:
+        asyncio.run(
+            ImageOperationRunner(
+                operations, Provider(), "volcengine_ark"
+            ).execute(request=request, operation=operation, pricing=pricing)
+        )
+    finally:
+        engine.dispose()
+
+    assert ledger.get_account(account.id).settled == 64

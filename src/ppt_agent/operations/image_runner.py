@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
+from typing import TYPE_CHECKING
 
 from ppt_agent.ledger.costs import UsageInput
 from ppt_agent.operations.provider import PrepareAttempt, ProviderOperationService
@@ -16,12 +17,78 @@ from ppt_agent.providers.image import (
 )
 from ppt_agent.providers.result_download import ResultDownloader
 
+if TYPE_CHECKING:
+    from ppt_agent.providers.catalog import ImagePricingSchedule
+
 
 @dataclass(frozen=True, slots=True)
 class ImagePricing:
     version: str
     currency: str
-    per_image_minor_units: int
+    output_up_to_threshold: int
+    output_above_threshold: int | None = None
+    additional_reference_image: int = 0
+    pixel_threshold: int = 2_610_000
+
+    def __post_init__(self) -> None:
+        if not self.version or not self.currency:
+            raise ValueError("image pricing identity is required")
+        if self.output_above_threshold is None:
+            object.__setattr__(
+                self, "output_above_threshold", self.output_up_to_threshold
+            )
+        if min(
+            self.output_up_to_threshold,
+            self.output_above_threshold,
+            self.additional_reference_image,
+        ) < 0 or self.pixel_threshold <= 0:
+            raise ValueError("image pricing values are invalid")
+
+    @classmethod
+    def from_schedule(cls, schedule: ImagePricingSchedule) -> ImagePricing:
+        return cls(
+            version=schedule.version,
+            currency=schedule.currency,
+            output_up_to_threshold=schedule.output_up_to_2_61mp,
+            output_above_threshold=schedule.output_above_2_61mp,
+            additional_reference_image=schedule.additional_reference_image,
+            pixel_threshold=schedule.pixel_threshold,
+        )
+
+    @property
+    def per_image_minor_units(self) -> int:
+        """Compatibility maximum for callers that have not yet supplied a request."""
+        assert self.output_above_threshold is not None
+        return max(self.output_up_to_threshold, self.output_above_threshold)
+
+    def quote(
+        self,
+        *,
+        width: int,
+        height: int,
+        generated_images: int,
+        input_images: int,
+    ) -> int:
+        if width <= 0 or height <= 0 or generated_images <= 0 or input_images < 0:
+            raise ValueError("positive dimensions and generated image count are required")
+        assert self.output_above_threshold is not None
+        output_price = (
+            self.output_up_to_threshold
+            if width * height <= self.pixel_threshold
+            else self.output_above_threshold
+        )
+        reference_price = (
+            max(input_images - 1, 0) * self.additional_reference_image
+        )
+        return generated_images * output_price + reference_price
+
+    def reserve(self, request: ImageGenerationRequest) -> int:
+        return self.quote(
+            width=request.width,
+            height=request.height,
+            generated_images=1,
+            input_images=len(request.reference_images),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,8 +114,8 @@ class ImageOperationRunner:
             raise ValueError("operation provider/model must match image request")
         if operation.currency != pricing.currency or operation.pricing_version != pricing.version:
             raise ValueError("operation pricing must match image pricing")
-        if operation.reservation_amount < pricing.per_image_minor_units:
-            raise ValueError("reservation must cover one generated image")
+        if operation.reservation_amount < pricing.reserve(request):
+            raise ValueError("reservation must cover the requested image generation")
         fingerprint = request.fingerprint()
         stored = self._operations.get_binary_result(operation.operation_id)
         if stored is not None:
@@ -138,7 +205,12 @@ class ImageOperationRunner:
         return ImageOperationResult(prepared.id, prepared.operation_id, content, media_type, width, height, result.usage)
 
     def _usage(self, attempt_id: str, operation: PrepareAttempt, pricing: ImagePricing, usage: ImageUsage, width: int, height: int) -> UsageInput:
-        amount = usage.generated_images * pricing.per_image_minor_units
+        amount = pricing.quote(
+            width=width,
+            height=height,
+            generated_images=usage.generated_images,
+            input_images=usage.input_images,
+        )
         return UsageInput(
             usage_key=f"image-usage:{attempt_id}", attempt_id=attempt_id,
             provider=operation.provider, model=operation.model,

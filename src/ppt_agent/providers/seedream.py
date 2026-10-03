@@ -56,7 +56,6 @@ class SeedreamProvider:
             "output_format": request.output_format,
             "response_format": "url",
             "watermark": False,
-            "sequential_image_generation": "disabled",
         }
         if request.reference_images:
             body["image"] = [
@@ -123,4 +122,3 @@ class SeedreamProvider:
             content=content,
             result_url=str(url) if url else None,
         )
-
