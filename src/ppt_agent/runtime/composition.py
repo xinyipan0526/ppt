@@ -95,7 +95,7 @@ def build_application(settings: Settings):
 
     provider_configuration = ProviderConfigurationService(
         settings,
-        FileProviderSecretStore(settings.workspace / ".secrets" / "providers"),
+        FileProviderSecretStore(settings.workspace / ".secrets" / "adapters"),
         is_idle=is_idle,
         activate=activate,
         settings_path=settings.workspace / "config" / "provider-settings.json",

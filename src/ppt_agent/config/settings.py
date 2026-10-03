@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 import os
 from pathlib import Path
 import tomllib
 from typing import Any, Mapping
-from urllib.parse import urlsplit
+from ppt_agent.providers.capabilities import ModelCategory
+from ppt_agent.providers.catalog import ARK_ADAPTER_ID, DEFAULT_MODEL_CATALOG
 
 
 class SettingsError(ValueError):
@@ -21,6 +22,12 @@ class Settings:
     port: int = 8000
     production: bool = False
     provider_mode: str = "deterministic"
+    adapter_id: str = ARK_ADAPTER_ID
+    ark_api_key: str | None = None
+    multimodal_model_id: str | None = None
+    image_model_id: str | None = None
+    pricing_overrides: dict[str, object] = field(default_factory=dict)
+    # Legacy provider fields remain readable for rollback and migration only.
     deepseek_api_key: str | None = None
     seedream_api_key: str | None = None
     qwen_api_key: str | None = None
@@ -59,6 +66,11 @@ class Settings:
             "server": {"host": self.host, "port": self.port, "production": self.production},
             "providers": {
                 "mode": self.provider_mode,
+                "adapter_id": self.adapter_id,
+                "ark_api_key": secret(self.ark_api_key),
+                "multimodal_model_id": self.multimodal_model_id,
+                "image_model_id": self.image_model_id,
+                "pricing_overrides": dict(self.pricing_overrides),
                 "deepseek_api_key": secret(self.deepseek_api_key),
                 "seedream_api_key": secret(self.seedream_api_key),
                 "qwen_api_key": secret(self.qwen_api_key),
@@ -98,6 +110,10 @@ _ENV_MAP = {
     "PPT_AGENT_PORT": ("port", int),
     "PPT_AGENT_PRODUCTION": ("production", lambda value: value.casefold() in {"1", "true", "yes", "on"}),
     "PPT_AGENT_PROVIDER_MODE": ("provider_mode", str),
+    "PPT_AGENT_ADAPTER_ID": ("adapter_id", str),
+    "ARK_API_KEY": ("ark_api_key", str),
+    "PPT_AGENT_MULTIMODAL_MODEL_ID": ("multimodal_model_id", str),
+    "PPT_AGENT_IMAGE_MODEL_ID": ("image_model_id", str),
     "DEEPSEEK_API_KEY": ("deepseek_api_key", str),
     "SEEDREAM_API_KEY": ("seedream_api_key", str),
     "QWEN_API_KEY": ("qwen_api_key", str),
@@ -126,6 +142,7 @@ _ENV_MAP = {
 }
 
 _SECRET_FILE_ENV_MAP = {
+    "ARK_API_KEY_FILE": "ark_api_key",
     "DEEPSEEK_API_KEY_FILE": "deepseek_api_key",
     "SEEDREAM_API_KEY_FILE": "seedream_api_key",
     "QWEN_API_KEY_FILE": "qwen_api_key",
@@ -183,6 +200,10 @@ def _toml_values(document: Mapping[str, Any]) -> dict[str, Any]:
         "host": server.get("host"), "port": server.get("port"),
         "production": server.get("production"),
         "provider_mode": providers.get("mode"),
+        "adapter_id": providers.get("adapter_id"),
+        "multimodal_model_id": providers.get("multimodal_model_id"),
+        "image_model_id": providers.get("image_model_id"),
+        "pricing_overrides": providers.get("pricing_overrides"),
         "deepseek_base_url": providers.get("deepseek_base_url"),
         "seedream_base_url": providers.get("seedream_base_url"),
         "qwen_base_url": providers.get("qwen_base_url"),
@@ -239,32 +260,20 @@ def validate_settings(settings: Settings) -> None:
         raise SettingsError("provider prices cannot be negative")
     if settings.provider_mode == "cloud":
         missing = [name for name, value in (
-            ("DEEPSEEK_API_KEY", settings.deepseek_api_key),
-            ("SEEDREAM_API_KEY", settings.seedream_api_key),
-            ("QWEN_API_KEY", settings.qwen_api_key),
+            ("ARK_API_KEY", settings.ark_api_key),
+            ("multimodal_model_id", settings.multimodal_model_id),
+            ("image_model_id", settings.image_model_id),
         ) if not value]
         if missing:
-            raise SettingsError(f"cloud provider keys are required: {', '.join(missing)}")
-        for name, endpoint in (
-            ("DeepSeek", settings.deepseek_base_url),
-            ("Seedream", settings.seedream_base_url),
-            ("Qwen", settings.qwen_base_url),
-        ):
-            if urlsplit(endpoint).scheme != "https":
-                raise SettingsError(f"{name} endpoint must use HTTPS in cloud mode")
-        if not settings.seedream_result_hosts:
-            raise SettingsError("Seedream result URL host allowlist is required in cloud mode")
-        required_prices = {
-            "deepseek_input_per_million": settings.deepseek_input_per_million,
-            "deepseek_output_per_million": settings.deepseek_output_per_million,
-            "seedream_per_image": settings.seedream_per_image,
-            "qwen_input_per_million": settings.qwen_input_per_million,
-            "qwen_output_per_million": settings.qwen_output_per_million,
-        }
-        missing_prices = [name for name, value in required_prices.items() if value <= 0]
-        if missing_prices:
-            raise SettingsError(
-                "positive cloud pricing is required: " + ", ".join(missing_prices)
+            raise SettingsError(f"cloud model configuration is required: {', '.join(missing)}")
+        if settings.adapter_id != ARK_ADAPTER_ID:
+            raise SettingsError("unsupported cloud adapter")
+        try:
+            DEFAULT_MODEL_CATALOG.require(
+                settings.multimodal_model_id, ModelCategory.MULTIMODAL
             )
-        if not settings.pricing_version.strip():
-            raise SettingsError("pricing version is required in cloud mode")
+            DEFAULT_MODEL_CATALOG.require(
+                settings.image_model_id, ModelCategory.IMAGE
+            )
+        except (KeyError, ValueError) as exc:
+            raise SettingsError(str(exc)) from exc

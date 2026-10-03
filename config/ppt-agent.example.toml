@@ -7,6 +7,12 @@ production = false
 
 [providers]
 mode = "deterministic"
+adapter_id = "volcengine_ark"
+# Required with mode = "cloud". The API key belongs in ARK_API_KEY or a Secret file.
+multimodal_model_id = "doubao-seed-2-1-pro-260915"
+image_model_id = "doubao-seedream-5-0-pro-260628"
+
+# Legacy provider settings below remain readable for rollback only.
 deepseek_base_url = "https://api.deepseek.com"
 seedream_base_url = "https://ark.cn-beijing.volces.com/api/v3"
 qwen_base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"

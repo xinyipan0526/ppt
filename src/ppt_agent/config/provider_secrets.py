@@ -9,6 +9,8 @@ from uuid import uuid4
 
 
 PROVIDERS = frozenset({"deepseek", "seedream", "qwen"})
+ADAPTERS = frozenset({"volcengine_ark"})
+SECRET_IDENTITIES = PROVIDERS | ADAPTERS
 
 
 class ProviderSecretError(RuntimeError):
@@ -94,7 +96,7 @@ class FileProviderSecretStore:
         return True
 
     def _path(self, provider: str) -> Path:
-        if provider not in PROVIDERS:
+        if provider not in SECRET_IDENTITIES:
             raise ProviderSecretError("unsupported provider secret")
         return self.root / f"{provider}.key"
 

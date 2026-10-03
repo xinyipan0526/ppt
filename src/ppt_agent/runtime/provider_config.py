@@ -1,4 +1,4 @@
-"""Runtime provider configuration assembled from non-secret settings and secrets."""
+"""Versioned model runtime configuration with atomic Ark credential updates."""
 
 from __future__ import annotations
 
@@ -10,27 +10,60 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from ppt_agent.config.provider_secrets import (
-    FileProviderSecretStore,
-    PROVIDERS,
-    ProviderSecretError,
-)
+from ppt_agent.config.provider_secrets import FileProviderSecretStore
 from ppt_agent.config.settings import Settings, SettingsError, validate_settings
+from ppt_agent.providers.capabilities import ModelCategory
+from ppt_agent.providers.catalog import (
+    ARK_ADAPTER_ID,
+    DEFAULT_MODEL_CATALOG,
+    ModelCatalog,
+    ModelCatalogEntry,
+)
+
+
+SCHEMA_VERSION = 2
 
 
 @dataclass(frozen=True, slots=True)
-class ProviderConfigurationSnapshot:
+class ModelRuntimeSnapshot:
     mode: str
     activation: str
-    providers: dict[str, dict[str, object]]
-    seedream_result_hosts: tuple[str, ...]
-    pricing_currency: str
-    pricing_version: str
-    deepseek_input_per_million: int
-    deepseek_output_per_million: int
-    seedream_per_image: int
-    qwen_input_per_million: int
-    qwen_output_per_million: int
+    adapter_id: str
+    adapter_status: dict[str, object]
+    multimodal_model: ModelCatalogEntry | None
+    image_model: ModelCatalogEntry | None
+    configuration_version: int
+    pricing_overrides: dict[str, object]
+    legacy_configuration_detected: bool = False
+
+    def public_projection(self) -> dict[str, object]:
+        def model(entry: ModelCatalogEntry | None) -> dict[str, object] | None:
+            if entry is None:
+                return None
+            return {
+                "adapter_id": entry.adapter_id,
+                "model_id": entry.model_id,
+                "display_name": entry.display_name,
+                "category": entry.category.value,
+                "lifecycle": entry.lifecycle.value,
+                "capabilities": [item.value for item in sorted(entry.capabilities)],
+                "recommended": entry.recommended,
+            }
+
+        return {
+            "mode": self.mode,
+            "activation": self.activation,
+            "adapter_id": self.adapter_id,
+            "adapter_status": dict(self.adapter_status),
+            "multimodal_model": model(self.multimodal_model),
+            "image_model": model(self.image_model),
+            "configuration_version": self.configuration_version,
+            "pricing_overrides": dict(self.pricing_overrides),
+            "legacy_configuration_detected": self.legacy_configuration_detected,
+        }
+
+
+ProviderConfigurationSnapshot = ModelRuntimeSnapshot
 
 
 class ProviderConfigurationService:
@@ -41,83 +74,96 @@ class ProviderConfigurationService:
         *,
         is_idle: Callable[[], bool],
         activate: Callable[[Settings], None],
+        qualify: Callable[[Settings], None] | None = None,
         settings_path: Path | None = None,
+        catalog: ModelCatalog = DEFAULT_MODEL_CATALOG,
     ) -> None:
         self.secrets = secrets
         self._is_idle = is_idle
         self._activate = activate
+        self._qualify = qualify or (lambda _: None)
         self._settings_path = settings_path
-        self._settings = self._load(settings)
+        self._catalog = catalog
         self._activation = "active"
+        self._configuration_version = 1
+        self._legacy_configuration_detected = False
+        self._settings = self._load(settings)
 
     @property
     def settings(self) -> Settings:
         return self._settings
 
-    def snapshot(self) -> ProviderConfigurationSnapshot:
-        statuses = {name: self.secrets.status(name) for name in PROVIDERS}
-        return ProviderConfigurationSnapshot(
+    def snapshot(self) -> ModelRuntimeSnapshot:
+        status = self.secrets.status(ARK_ADAPTER_ID)
+        multimodal = self._catalog_entry(
+            self._settings.multimodal_model_id, ModelCategory.MULTIMODAL
+        )
+        image = self._catalog_entry(
+            self._settings.image_model_id, ModelCategory.IMAGE
+        )
+        return ModelRuntimeSnapshot(
             mode=self._settings.provider_mode,
             activation=self._activation,
-            providers={
-                name: {
-                    "configured": status.configured or bool(
-                        getattr(self._settings, f"{name}_api_key")
-                    ),
-                    "backend": (
-                        status.backend if status.configured else "process_configuration"
-                    ),
-                    "masked_suffix": status.masked_suffix,
-                }
-                for name, status in sorted(statuses.items())
+            adapter_id=self._settings.adapter_id,
+            adapter_status={
+                "configured": status.configured or bool(self._settings.ark_api_key),
+                "backend": (
+                    status.backend if status.configured else "process_configuration"
+                ),
             },
-            seedream_result_hosts=self._settings.seedream_result_hosts,
-            pricing_currency=self._settings.pricing_currency,
-            pricing_version=self._settings.pricing_version,
-            deepseek_input_per_million=self._settings.deepseek_input_per_million,
-            deepseek_output_per_million=self._settings.deepseek_output_per_million,
-            seedream_per_image=self._settings.seedream_per_image,
-            qwen_input_per_million=self._settings.qwen_input_per_million,
-            qwen_output_per_million=self._settings.qwen_output_per_million,
+            multimodal_model=multimodal,
+            image_model=image,
+            configuration_version=self._configuration_version,
+            pricing_overrides=dict(self._settings.pricing_overrides),
+            legacy_configuration_detected=self._legacy_configuration_detected,
         )
 
     def update(
         self,
         *,
-        secret_values: dict[str, str] | None = None,
-        **changes: Any,
-    ) -> ProviderConfigurationSnapshot:
-        replacements = secret_values or {}
-        if set(replacements).difference(PROVIDERS):
-            raise ProviderSecretError("unsupported provider secret")
-        previous = {name: self.secrets.load(name) for name in replacements}
+        ark_api_key: str | None,
+        multimodal_model_id: str,
+        image_model_id: str,
+        pricing_overrides: dict[str, object] | None = None,
+    ) -> ModelRuntimeSnapshot:
+        self._catalog.require(multimodal_model_id, ModelCategory.MULTIMODAL)
+        self._catalog.require(image_model_id, ModelCategory.IMAGE)
+        self._validate_overrides(pricing_overrides or {})
+
+        previous_secret = self.secrets.load(ARK_ADAPTER_ID)
+        effective_secret = ark_api_key.strip() if ark_api_key is not None else previous_secret
+        if not effective_secret:
+            effective_secret = self._settings.ark_api_key
+        candidate = replace(
+            self._settings,
+            provider_mode="cloud" if effective_secret else "deterministic",
+            adapter_id=ARK_ADAPTER_ID,
+            ark_api_key=effective_secret,
+            multimodal_model_id=multimodal_model_id,
+            image_model_id=image_model_id,
+            pricing_overrides=dict(pricing_overrides or {}),
+        )
+        validate_settings(candidate)
+
+        previous_document = self._read_persisted_bytes()
+        replaced_secret = ark_api_key is not None
         try:
-            for name, value in replacements.items():
-                self.secrets.replace(name, value)
-            keys = {
-                name: self.secrets.load(name)
-                or getattr(self._settings, f"{name}_api_key")
-                for name in PROVIDERS
-            }
-            complete = all(keys.values())
-            candidate = replace(
-                self._settings,
-                **changes,
-                provider_mode="cloud" if complete else "deterministic",
-                deepseek_api_key=keys["deepseek"],
-                seedream_api_key=keys["seedream"],
-                qwen_api_key=keys["qwen"],
-            )
-            validate_settings(candidate)
+            if replaced_secret:
+                self.secrets.replace(ARK_ADAPTER_ID, ark_api_key)
+            self._qualify(candidate)
             self._persist(candidate)
         except Exception:
-            for name, value in previous.items():
-                if value is None:
-                    self.secrets.delete(name)
+            if replaced_secret:
+                if previous_secret is None:
+                    self.secrets.delete(ARK_ADAPTER_ID)
                 else:
-                    self.secrets.replace(name, value)
+                    self.secrets.replace(ARK_ADAPTER_ID, previous_secret)
+            self._restore_persisted_bytes(previous_document)
             raise
+
         self._settings = candidate
+        self._configuration_version += 1
+        self._legacy_configuration_detected = False
         if self._is_idle():
             self._activate(candidate)
             self._activation = "active"
@@ -125,17 +171,30 @@ class ProviderConfigurationService:
             self._activation = "pending"
         return self.snapshot()
 
-    def delete(self, provider: str) -> ProviderConfigurationSnapshot:
-        previous = self.secrets.load(provider)
-        self.secrets.delete(provider)
+    def delete(self, adapter_id: str = ARK_ADAPTER_ID) -> ModelRuntimeSnapshot:
+        if adapter_id != ARK_ADAPTER_ID:
+            raise ValueError("unsupported adapter")
+        previous = self.secrets.load(ARK_ADAPTER_ID)
+        self.secrets.delete(ARK_ADAPTER_ID)
         try:
-            return self.update()
+            candidate = replace(
+                self._settings, provider_mode="deterministic", ark_api_key=None
+            )
+            self._persist(candidate)
         except Exception:
             if previous is not None:
-                self.secrets.replace(provider, previous)
+                self.secrets.replace(ARK_ADAPTER_ID, previous)
             raise
+        self._settings = candidate
+        self._configuration_version += 1
+        if self._is_idle():
+            self._activate(candidate)
+            self._activation = "active"
+        else:
+            self._activation = "pending"
+        return self.snapshot()
 
-    def activate_if_idle(self) -> ProviderConfigurationSnapshot:
+    def activate_if_idle(self) -> ModelRuntimeSnapshot:
         if self._activation == "pending" and self._is_idle():
             self._activate(self._settings)
             self._activation = "active"
@@ -150,25 +209,31 @@ class ProviderConfigurationService:
                 raise SettingsError("persisted provider settings cannot be read") from exc
             if not isinstance(loaded, dict):
                 raise SettingsError("persisted provider settings must be an object")
-            values = {name: loaded[name] for name in _PERSISTED_FIELDS if name in loaded}
-            if "seedream_result_hosts" in values:
-                values["seedream_result_hosts"] = tuple(values["seedream_result_hosts"])
-        keys = {
-            name: self.secrets.load(name) or getattr(base, f"{name}_api_key")
-            for name in PROVIDERS
-        }
-        complete = all(keys.values())
+            if loaded.get("schema_version") == SCHEMA_VERSION:
+                values = {
+                    name: loaded.get(name)
+                    for name in (
+                        "adapter_id",
+                        "multimodal_model_id",
+                        "image_model_id",
+                        "pricing_overrides",
+                    )
+                }
+                if values["pricing_overrides"] is None:
+                    values["pricing_overrides"] = {}
+            else:
+                self._legacy_configuration_detected = True
+
+        secret = self.secrets.load(ARK_ADAPTER_ID) or base.ark_api_key
+        candidate = replace(base, **values, ark_api_key=secret)
+        complete = bool(
+            secret
+            and candidate.adapter_id == ARK_ADAPTER_ID
+            and candidate.multimodal_model_id
+            and candidate.image_model_id
+        )
         candidate = replace(
-            base,
-            **values,
-            provider_mode=(
-                "cloud"
-                if complete and (values or base.provider_mode == "cloud")
-                else "deterministic"
-            ),
-            deepseek_api_key=keys["deepseek"],
-            seedream_api_key=keys["seedream"],
-            qwen_api_key=keys["qwen"],
+            candidate, provider_mode="cloud" if complete else "deterministic"
         )
         validate_settings(candidate)
         return candidate
@@ -180,8 +245,13 @@ class ProviderConfigurationService:
         if path.is_symlink():
             raise SettingsError("provider settings path cannot be a symbolic link")
         path.parent.mkdir(parents=True, exist_ok=True)
-        document = {name: getattr(settings, name) for name in _PERSISTED_FIELDS}
-        document["seedream_result_hosts"] = list(settings.seedream_result_hosts)
+        document = {
+            "schema_version": SCHEMA_VERSION,
+            "adapter_id": settings.adapter_id,
+            "multimodal_model_id": settings.multimodal_model_id,
+            "image_model_id": settings.image_model_id,
+            "pricing_overrides": dict(settings.pricing_overrides),
+        }
         temporary = path.parent / f".{path.name}.{uuid4().hex}.tmp"
         try:
             with temporary.open("x", encoding="utf-8") as stream:
@@ -197,12 +267,49 @@ class ProviderConfigurationService:
             except FileNotFoundError:
                 pass
 
+    def _catalog_entry(
+        self, model_id: str | None, category: ModelCategory
+    ) -> ModelCatalogEntry | None:
+        if model_id is None:
+            return None
+        try:
+            return self._catalog.require(model_id, category)
+        except (KeyError, ValueError):
+            return None
 
-_PERSISTED_FIELDS = (
-    "deepseek_base_url", "seedream_base_url", "qwen_base_url",
-    "deepseek_model", "seedream_model", "qwen_vision_model", "qwen_ocr_model",
-    "seedream_result_hosts", "pricing_currency", "pricing_version",
-    "deepseek_input_per_million", "deepseek_output_per_million",
-    "deepseek_cached_input_per_million", "seedream_per_image",
-    "qwen_input_per_million", "qwen_output_per_million",
-)
+    @staticmethod
+    def _validate_overrides(values: dict[str, object]) -> None:
+        for name, value in values.items():
+            if not isinstance(name, str) or not name:
+                raise SettingsError("pricing override names must be non-empty strings")
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
+                raise SettingsError("pricing overrides must be non-negative numbers")
+
+    def _read_persisted_bytes(self) -> bytes | None:
+        if self._settings_path is None:
+            return None
+        try:
+            return self._settings_path.read_bytes()
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            raise SettingsError("persisted provider settings cannot be read") from exc
+
+    def _restore_persisted_bytes(self, value: bytes | None) -> None:
+        if self._settings_path is None:
+            return
+        try:
+            if value is None:
+                self._settings_path.unlink(missing_ok=True)
+            else:
+                self._settings_path.write_bytes(value)
+        except OSError as exc:
+            raise SettingsError("provider settings rollback failed") from exc
+
+
+__all__ = [
+    "ModelRuntimeSnapshot",
+    "ProviderConfigurationService",
+    "ProviderConfigurationSnapshot",
+    "SCHEMA_VERSION",
+]

@@ -46,3 +46,11 @@ def test_file_provider_secret_delete_is_idempotent(tmp_path: Path) -> None:
     assert store.delete("qwen") is True
     assert store.delete("qwen") is False
     assert store.status("qwen").configured is False
+
+
+def test_adapter_secret_is_stored_under_its_exact_adapter_id(tmp_path: Path) -> None:
+    store = FileProviderSecretStore(tmp_path / ".secrets" / "adapters")
+    store.replace("volcengine_ark", "ark-secret-value")
+
+    assert store.load("volcengine_ark") == "ark-secret-value"
+    assert (store.root / "volcengine_ark.key").read_text(encoding="utf-8") == "ark-secret-value"
