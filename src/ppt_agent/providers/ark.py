@@ -245,7 +245,10 @@ class ArkMultimodalAdapter:
                 billing_known=known,
                 confirmed_uncharged=known,
                 usage=None,
-                summary={"http_status": response.status_code},
+                summary={
+                    "http_status": response.status_code,
+                    "provider_error_type": code,
+                },
             )
         try:
             payload = response.json()

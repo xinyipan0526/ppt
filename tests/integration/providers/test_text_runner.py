@@ -1,5 +1,6 @@
 import asyncio
 from dataclasses import replace
+import logging
 from pathlib import Path
 from uuid import uuid4
 
@@ -149,13 +150,23 @@ def test_schema_failure_with_usage_is_charged_and_attempt_fails() -> None:
     assert reservation.amount_settled == 20
 
 
-def test_confirmed_uncharged_failure_releases_reservation() -> None:
+def test_confirmed_uncharged_failure_releases_reservation(caplog) -> None:
     engine, ledger, service, account_id = setup_services()
     provider = FakeProvider(
         ProviderCallError(
-            "invalid_request", False, True, True, None, {"http_status": 400}
+            "invalid_request",
+            False,
+            True,
+            True,
+            None,
+            {
+                "http_status": 400,
+                "provider_error_type": "invalid_request",
+                "raw_response": {"api_key": "must-not-persist"},
+            },
         )
     )
+    caplog.set_level(logging.INFO, logger="ppt_agent.operations.text_runner")
     try:
         with pytest.raises(ProviderCallError, match="invalid_request"):
             asyncio.run(
@@ -172,10 +183,24 @@ def test_confirmed_uncharged_failure_releases_reservation() -> None:
         engine.dispose()
 
     assert attempt.status is AttemptStatus.FAILED
+    assert attempt.response_summary == {
+        "http_status": 400,
+        "provider_error_type": "invalid_request",
+    }
     assert reservation.status is ReservationStatus.RELEASED
+    records = [
+        record for record in caplog.records
+        if record.name == "ppt_agent.operations.text_runner"
+    ]
+    assert [record.getMessage() for record in records] == [
+        "provider.submitted",
+        "provider.failed",
+    ]
+    assert records[-1].error_code == "invalid_request"
+    assert records[-1].http_status == 400
 
 
-def test_unknown_outcome_holds_budget_and_blocks_automatic_retry() -> None:
+def test_unknown_outcome_holds_budget_and_blocks_automatic_retry(caplog) -> None:
     engine, ledger, service, account_id = setup_services()
     provider = FakeProvider(
         ProviderCallError(
@@ -183,6 +208,7 @@ def test_unknown_outcome_holds_budget_and_blocks_automatic_retry() -> None:
         )
     )
     runner = TextOperationRunner(service, provider)
+    caplog.set_level(logging.INFO, logger="ppt_agent.operations.text_runner")
     try:
         with pytest.raises(ProviderCallError, match="unknown_remote_outcome"):
             asyncio.run(
@@ -210,6 +236,11 @@ def test_unknown_outcome_holds_budget_and_blocks_automatic_retry() -> None:
     assert provider.calls == 1
     assert attempt.status is AttemptStatus.OUTCOME_UNKNOWN
     assert reservation.status is ReservationStatus.HELD_UNKNOWN
+    assert any(
+        record.getMessage() == "provider.outcome_unknown"
+        and record.error_code == "unknown_remote_outcome"
+        for record in caplog.records
+    )
 
 
 def test_success_payload_is_reused_after_crash_before_artifact_materialization() -> None:

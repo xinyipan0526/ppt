@@ -175,6 +175,34 @@ def test_http_errors_preserve_billing_boundary(
     assert raised.value.billing_known is confirmed_uncharged
 
 
+def test_http_400_failure_keeps_only_safe_normalized_metadata() -> None:
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            400,
+            json={
+                "error": {
+                    "type": "invalid_request_error",
+                    "message": "prompt=confidential source content",
+                    "request_body": {"api_key": "secret"},
+                }
+            },
+        )
+
+    async def scenario():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            return await ArkMultimodalAdapter("secret", client=client).complete(
+                _text_request()
+            )
+
+    with pytest.raises(ProviderCallError) as raised:
+        asyncio.run(scenario())
+
+    assert raised.value.safe_summary == {
+        "http_status": 400,
+        "provider_error_type": "invalid_request",
+    }
+
+
 def test_network_failure_is_unknown_and_not_automatically_retryable() -> None:
     calls = 0
 

@@ -4,19 +4,27 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 import json
+import logging
 from collections.abc import Callable
 
 from pydantic import ValidationError
 
 from ppt_agent.domain.contracts import ContractModel
 from ppt_agent.ledger.costs import UsageInput
-from ppt_agent.operations.provider import PrepareAttempt, ProviderOperationService
+from ppt_agent.operations.provider import (
+    PrepareAttempt,
+    ProviderOperationService,
+    safe_provider_failure_summary,
+)
 from ppt_agent.providers.text import (
     ProviderCallError,
     StructuredTextProvider,
     StructuredTextRequest,
     TextUsage,
 )
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -95,26 +103,53 @@ class TextOperationRunner:
             replace(operation, request_fingerprint=fingerprint)
         )
         self._operations.commit_submission_intent(prepared.id)
+        logger.info(
+            "provider.submitted",
+            extra=self._log_context(operation, status="submitted", event_type="provider.submitted"),
+        )
         try:
             result = await self._provider.complete(request)
         except ProviderCallError as exc:
+            summary = safe_provider_failure_summary(exc.safe_summary)
             if exc.usage is not None and exc.billing_known:
                 self._operations.record_charged_failure(
                     prepared.id,
                     self._usage_input(prepared.id, operation, pricing, exc.usage),
                     exc.code,
-                    exc.safe_summary,
+                    summary,
                 )
             elif exc.confirmed_uncharged:
                 self._operations.record_known_failure(
                     prepared.id,
                     error_code=exc.code,
                     confirmed_uncharged=True,
+                    response_summary=summary,
                     retry_at=(datetime.now(UTC) + timedelta(seconds=30)) if exc.retryable else None,
                 )
             else:
                 self._operations.begin_recovery(prepared.id)
                 self._operations.mark_outcome_unknown(prepared.id)
+                logger.warning(
+                    "provider.outcome_unknown",
+                    extra=self._log_context(
+                        operation,
+                        status="outcome_unknown",
+                        event_type="provider.outcome_unknown",
+                        error_code=exc.code,
+                        **summary,
+                    ),
+                )
+                raise
+            logger.error(
+                "provider.failed",
+                extra=self._log_context(
+                    operation,
+                    status="failed",
+                    event_type="provider.failed",
+                    error_code=exc.code,
+                    **summary,
+                ),
+            )
             raise
 
         try:
@@ -141,6 +176,15 @@ class TextOperationRunner:
                 self._usage_input(prepared.id, operation, pricing, result.usage),
                 error.code,
                 error.safe_summary,
+            )
+            logger.error(
+                "provider.failed",
+                extra=self._log_context(
+                    operation,
+                    status="failed",
+                    event_type="provider.failed",
+                    error_code=error.code,
+                ),
             )
             raise error from exc
 
@@ -186,6 +230,20 @@ class TextOperationRunner:
             raise ValueError(
                 f"reservation must cover conservative maximum of {maximum} minor units"
             )
+
+    @staticmethod
+    def _log_context(
+        operation: PrepareAttempt, **context: int | str | None
+    ) -> dict[str, int | str]:
+        values: dict[str, int | str | None] = {
+            "run_id": operation.run_id,
+            "step_id": operation.step_id,
+            "operation_id": operation.operation_id,
+            "provider": operation.provider,
+            "model": operation.model,
+            **context,
+        }
+        return {key: value for key, value in values.items() if value is not None}
 
     @staticmethod
     def conservative_reservation(

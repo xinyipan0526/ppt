@@ -1,5 +1,6 @@
 import asyncio
 from collections import deque
+import logging
 from pathlib import Path
 from types import SimpleNamespace
 from uuid import uuid4
@@ -38,6 +39,8 @@ from ppt_agent.storage.models import (
     ProjectRecord,
     ProviderOperationRecord,
     WorkflowInterruptRecord,
+    WorkflowRunRecord,
+    WorkflowStepRecord,
 )
 from ppt_agent.workflows.deck_planning import DeckPlanningWorkflow
 from ppt_agent.workflows.planning_store import PlanRevisionRequest, PlanningStore
@@ -220,6 +223,22 @@ class FailingRunner:
         )
 
 
+class KnownFailureRunner:
+    async def execute(self, **_kwargs):
+        raise ProviderCallError(
+            "invalid_request",
+            False,
+            True,
+            True,
+            None,
+            {
+                "http_status": 400,
+                "provider_error_type": "invalid_request",
+                "raw_response": {"api_key": "must-not-persist"},
+            },
+        )
+
+
 def planning_outputs(page_count: int = 2) -> list[object]:
     brief = PresentationBrief(topic="Roadmap", page_count=page_count)
     outline = DeckOutline(
@@ -290,6 +309,53 @@ def test_uncertain_http_failure_requires_recovery_instead_of_failing_run() -> No
     assert snapshot.status is RunStatus.RECOVERY_REQUIRED
 
 
+def test_known_provider_failure_projects_only_safe_error_on_step_and_run(caplog) -> None:
+    engine, sessions, store, project_id = setup_store()
+    workflow = DeckPlanningWorkflow(
+        store=store,
+        artifacts=ArtifactStore(
+            sessions, Path(".cache/test-deck-workflow") / str(uuid4())
+        ),
+        runner=KnownFailureRunner(),
+        account_id="fake-account",
+        pricing=TextPricing("deepseek-v1", "CNY", 1, 1),
+        model="deepseek-chat",
+        reservation_minor_units=100,
+    )
+    caplog.set_level(logging.INFO, logger="ppt_agent.workflows.deck_planning")
+    try:
+        run = asyncio.run(
+            workflow.create_run(project_id=project_id, normalized_text="Roadmap")
+        )
+        asyncio.run(workflow.execute(run.id))
+        with session_scope(sessions) as session:
+            persisted_run = session.get(WorkflowRunRecord, run.id)
+            persisted_step = session.scalar(
+                select(WorkflowStepRecord).where(WorkflowStepRecord.run_id == run.id)
+            )
+    finally:
+        engine.dispose()
+
+    expected = {
+        "code": "invalid_request",
+        "provider_summary": {
+            "http_status": 400,
+            "provider_error_type": "invalid_request",
+        },
+    }
+    assert persisted_run is not None
+    assert persisted_step is not None
+    assert persisted_run.error == expected
+    assert persisted_step.error == expected
+    records = [
+        record for record in caplog.records
+        if record.name == "ppt_agent.workflows.deck_planning"
+    ]
+    assert [record.getMessage() for record in records] == ["step.failed", "run.failed"]
+    assert all(record.error_code == "invalid_request" for record in records)
+    assert all(record.http_status == 400 for record in records)
+
+
 def pending_interrupt(sessions, run_id: str):
     with session_scope(sessions) as session:
         return session.scalar(
@@ -339,10 +405,11 @@ def test_brief_records_parsed_material_provenance() -> None:
     assert edge.edge_type is ArtifactEdgeType.DERIVED_FROM
 
 
-def test_complete_workflow_persists_artifacts_and_requires_approval() -> None:
+def test_complete_workflow_persists_artifacts_and_requires_approval(caplog) -> None:
     engine, sessions, store, workflow, runner, project_id = setup_workflow(
         planning_outputs()
     )
+    caplog.set_level(logging.INFO, logger="ppt_agent.workflows.deck_planning")
     try:
         run = asyncio.run(
             workflow.create_run(
@@ -372,6 +439,10 @@ def test_complete_workflow_persists_artifacts_and_requires_approval() -> None:
     assert artifact_count == 7  # brief, outline, design, page source, two pages, bundle
     assert all(request.model == "deepseek-chat" for request in runner.requests)
     assert all(request.user_id == project_id for request in runner.requests)
+    assert any(
+        record.getMessage() == "run.terminal" and record.status == "succeeded"
+        for record in caplog.records
+    )
 
 
 def test_workflow_uses_composed_provider_identity_for_attempts() -> None:

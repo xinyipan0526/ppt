@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 from hashlib import sha256
 import json
+import logging
 from pathlib import Path
 from typing import Any, Callable, cast
 from uuid import NAMESPACE_URL, uuid5
@@ -22,7 +23,7 @@ from ppt_agent.domain.contracts import (
     SchemaEnvelope,
 )
 from ppt_agent.domain.state_machine import RunEvent, RunStatus, StepEvent
-from ppt_agent.operations.provider import PrepareAttempt
+from ppt_agent.operations.provider import PrepareAttempt, safe_provider_failure_summary
 from ppt_agent.operations.text_runner import TextOperationRunner, TextPricing
 from ppt_agent.providers.text import ProviderCallError, StructuredTextRequest
 from ppt_agent.tools.clarification import (
@@ -36,6 +37,9 @@ from ppt_agent.workflows.planning_store import (
     PlanningStep,
     PlanningStore,
 )
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -128,6 +132,7 @@ class DeckPlanningWorkflow:
             step = self.store.next_step(run_id)
             self.store.repository.transition_step(step.step_id, StepEvent.STARTED)
             if self._recover_committed_step(run_id, step):
+                self._log_terminal_if_reached(run_id, step)
                 continue
             try:
                 if step.stage == "build_brief":
@@ -141,6 +146,7 @@ class DeckPlanningWorkflow:
                     await self._build_pages(run_id, step)
                 else:
                     if not self._review(run_id, step):
+                        self._log_terminal_if_reached(run_id, step)
                         return
             except ProviderCallError as exc:
                 if exc.retryable and exc.confirmed_uncharged:
@@ -153,13 +159,27 @@ class DeckPlanningWorkflow:
                         run_id, reason=exc.code
                     )
                 else:
+                    error = {
+                        "code": exc.code,
+                        "provider_summary": safe_provider_failure_summary(
+                            exc.safe_summary
+                        ),
+                    }
                     self.store.repository.transition_step(
-                        step.step_id, StepEvent.FAILED, payload={"error_code": exc.code}
+                        step.step_id, StepEvent.FAILED, payload={"error": error}
+                    )
+                    logger.error(
+                        "step.failed",
+                        extra=self._failure_log_context(run_id, step, exc),
                     )
                     self.store.repository.transition_run(
                         run_id,
                         RunEvent.UNRECOVERABLE_FAILURE,
-                        payload={"error_code": exc.code},
+                        payload={"error": error},
+                    )
+                    logger.error(
+                        "run.failed",
+                        extra=self._failure_log_context(run_id, step, exc),
                     )
                 return
 
@@ -664,6 +684,38 @@ class DeckPlanningWorkflow:
         pages = self.store.stage_output_refs(run_id, "build_page_specs")
         indexes = request.page_indexes or tuple(range(1, len(pages) + 1))
         return tuple(pages[index - 1] for index in indexes)
+
+    def _failure_log_context(
+        self, run_id: str, step: PlanningStep, error: ProviderCallError
+    ) -> dict[str, int | str]:
+        run = self.store.repository.get_run(run_id)
+        return {
+            "project_id": run.project_id,
+            "run_id": run_id,
+            "step_id": step.step_id,
+            "operation_id": self._operation_id(run_id, step),
+            "provider": self._provider_name,
+            "model": self._model,
+            "status": "failed",
+            "error_code": error.code,
+            **safe_provider_failure_summary(error.safe_summary),
+        }
+
+    def _log_terminal_if_reached(self, run_id: str, step: PlanningStep) -> None:
+        run = self.store.repository.get_run(run_id)
+        if run.status not in {RunStatus.SUCCEEDED, RunStatus.CANCELLED}:
+            return
+        logger.info(
+            "run.terminal",
+            extra={
+                "project_id": run.project_id,
+                "run_id": run_id,
+                "step_id": step.step_id,
+                "operation_id": self._operation_id(run_id, step),
+                "status": run.status.value,
+                "event_type": "run.terminal",
+            },
+        )
 
     @staticmethod
     def _operation_id(run_id: str, step: PlanningStep) -> str:

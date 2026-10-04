@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 from datetime import UTC, datetime
+import re
 from typing import Any
 from uuid import uuid4
 
@@ -141,6 +142,24 @@ NONTERMINAL_ATTEMPT_STATUSES = {
     AttemptStatus.RECONCILING,
     AttemptStatus.CANCEL_REQUESTED,
 }
+
+_SAFE_PROVIDER_SUMMARY_STRING = re.compile(r"[A-Za-z_][A-Za-z0-9_.-]{0,127}")
+
+
+def safe_provider_failure_summary(summary: dict[str, Any] | None) -> dict[str, int | str]:
+    """Allowlist bounded Provider failure metadata before durable persistence."""
+
+    if not isinstance(summary, dict):
+        return {}
+    safe: dict[str, int | str] = {}
+    status = summary.get("http_status")
+    if isinstance(status, int) and not isinstance(status, bool) and 100 <= status <= 599:
+        safe["http_status"] = status
+    for key in ("provider_error_type", "exception_type"):
+        value = summary.get(key)
+        if isinstance(value, str) and _SAFE_PROVIDER_SUMMARY_STRING.fullmatch(value):
+            safe[key] = value
+    return safe
 
 
 class ProviderOperationService:
@@ -505,6 +524,7 @@ class ProviderOperationService:
         *,
         error_code: str,
         confirmed_uncharged: bool,
+        response_summary: dict[str, Any] | None = None,
         retry_at: datetime | None = None,
     ) -> AttemptSnapshot:
         if not confirmed_uncharged:
@@ -519,6 +539,7 @@ class ProviderOperationService:
             )
             attempt.error_code = error_code
             attempt.response_received_at = datetime.now(UTC)
+            attempt.response_summary = safe_provider_failure_summary(response_summary)
             self._ledger.release_in_transaction(session, attempt.reservation_id)
             if retry_at is not None:
                 if retry_at.tzinfo is None or retry_at.utcoffset() is None:
@@ -575,7 +596,7 @@ class ProviderOperationService:
             attempt.usage_record_id = usage_record.id
             attempt.error_code = error_code
             attempt.response_received_at = datetime.now(UTC)
-            attempt.response_summary = response_summary
+            attempt.response_summary = safe_provider_failure_summary(response_summary)
             self._recompute_operation(session, attempt.operation_id)
             return self._attempt_snapshot(attempt)
 

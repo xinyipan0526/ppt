@@ -290,6 +290,8 @@ class WorkflowRepository:
             )
             record.status = next_status
             event_payload = dict(payload or {})
+            if "error" in event_payload:
+                record.error = event_payload["error"]
             event_payload.update({"step_id": step_id, "status": next_status.value})
             self._append_event(
                 session,
@@ -407,6 +409,8 @@ class WorkflowRepository:
             )
             record.status = next_status
             event_payload = dict(payload or {})
+            if "error" in event_payload:
+                record.error = event_payload["error"]
             event_payload["status"] = next_status.value
             self._append_event(
                 session,
