@@ -54,3 +54,20 @@ global root logger threshold. Verification: focused logger/runtime tests ->
 Authorization redaction now accepts HTTP scheme tokens containing digits and
 hyphens (for example `AWS4-HMAC-SHA256` and `Foo-1`). Message and exception
 regressions cover these schemes. Focused logger/runtime tests: `6 passed`.
+
+## Review fix round 4
+
+Authorization scheme matching now recognizes the complete RFC HTTP `token`
+character set, including `+` and `_`. A regression test exercises `OAuth+1`
+in a message and `Bearer_1` in exception text. The new test was observed RED
+against the prior matcher (`message-secret` and `exception-secret` appeared in
+the JSONL output), then GREEN after the one-character-class correction.
+
+Verification:
+
+- `pytest tests/unit/observability/test_logging.py -q --basetemp='.cache/pytest-task1-logging-red-fix4b'` -> `1 failed, 5 passed` (expected pre-fix regression failure)
+- `pytest tests/unit/observability/test_logging.py -q --basetemp='.cache/pytest-task1-logging-green-fix4'` -> `6 passed`
+- `pytest tests/integration/runtime/test_application.py tests/integration/runtime/test_application_logging.py -q --basetemp='.cache/pytest-task1-runtime-fix4'` -> `6 passed`
+
+Concerns: none introduced; the redaction remains intentionally limited to
+Authorization header-style text and replaces credential values only.

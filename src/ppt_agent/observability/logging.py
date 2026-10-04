@@ -20,7 +20,7 @@ _SENSITIVE_KEY = re.compile(
     re.IGNORECASE,
 )
 _SENSITIVE_TEXT = (
-    re.compile(r"(?i)(authorization\s*:\s*[A-Za-z][A-Za-z0-9-]*\s+)[^\s,;]+"),
+    re.compile(r"(?i)(authorization\s*:\s*[-!#$%&'*+.^_`|~0-9A-Za-z]+\s+)[^\s,;]+"),
     re.compile(r"(?i)(\b(?:api[_-]?key|access[_-]?token|password|secret)\s*[=:]\s*)[^\s,;]+"),
     re.compile(r"(?i)(\b(?:prompt|source[_ -]?content)\s*[:=]\s*)[^\n]+"),
     re.compile(r"(?i)(?:(?:[A-Za-z]:)?[\\/][^\s,;]*?(?:\.secrets|secrets)[\\/]|\b(?:\.secrets|secrets)[\\/])[^\s,;]+"),

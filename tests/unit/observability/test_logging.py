@@ -124,3 +124,23 @@ def test_file_logger_redacts_standalone_secret_paths_and_other_auth_schemes(tmp_
     assert "adapter.json" not in text
     assert "do not leak" not in text
     assert "Authorization" in text
+
+
+def test_file_logger_redacts_rfc_token_auth_schemes_in_messages_and_exceptions(tmp_path: Path) -> None:
+    handler = configure_file_logging(tmp_path, max_bytes=10_000, backup_count=1)
+    logger = logging.getLogger("test.audit.rfc-token-auth")
+    logger.setLevel(logging.INFO)
+    try:
+        logger.info("Authorization: OAuth+1 message-secret")
+        try:
+            raise RuntimeError("Authorization: Bearer_1 exception-secret")
+        except RuntimeError:
+            logger.exception("provider failure")
+        handler.flush()
+        text = (tmp_path / "logs" / "ppt-agent.jsonl").read_text()
+    finally:
+        logger.setLevel(logging.NOTSET)
+        shutdown_file_logging(handler)
+
+    assert "message-secret" not in text
+    assert "exception-secret" not in text
