@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import timedelta
@@ -29,6 +30,7 @@ from ppt_agent.storage.database import (
 from ppt_agent.storage.locking import WorkspaceInstanceLock
 from ppt_agent.storage.maintenance import run_migrations, verify_database_integrity
 from ppt_agent.storage.workspace import WorkspacePaths
+from ppt_agent.observability.logging import configure_file_logging, shutdown_file_logging
 
 
 @dataclass(frozen=True, slots=True)
@@ -112,6 +114,7 @@ class ApplicationRuntime:
         self._lock: WorkspaceInstanceLock | None = None
         self._retention: EventRetentionTask | None = None
         self._provider_retries: ProviderRetryTask | None = None
+        self._file_log_handler: logging.Handler | None = None
         self._ready = False
 
     @property
@@ -136,6 +139,18 @@ class ApplicationRuntime:
 
             database_path = paths.resolve(self.config.database_name)
             await asyncio.to_thread(self._migration_runner, database_path)
+            self._file_log_handler = configure_file_logging(
+                paths.root, max_bytes=10 * 1024 * 1024, backup_count=3
+            )
+            runtime_logger = logging.getLogger("ppt_agent.runtime")
+            # Alembic's fileConfig may disable loggers created by an earlier
+            # runtime in this process; the application logger must remain
+            # usable for the lifecycle records owned by this handler.
+            runtime_logger.disabled = False
+            runtime_logger.warning(
+                "runtime startup",
+                extra={"workspace": str(paths.root), "status": "starting"},
+            )
             self.engine = create_sqlite_engine(
                 self.capabilities.database_config(database_path)
             )
@@ -208,6 +223,11 @@ class ApplicationRuntime:
 
     async def stop(self) -> tuple[str, ...]:
         self._ready = False
+        if self._file_log_handler is not None:
+            logging.getLogger("ppt_agent.runtime").warning(
+                "runtime shutdown", extra={"status": "stopping"}
+            )
+            self._file_log_handler.flush()
         interrupted: tuple[str, ...] = ()
         failure: BaseException | None = None
         if self._provider_retries is not None:
@@ -263,6 +283,9 @@ class ApplicationRuntime:
                 failure = failure or exc
             finally:
                 self._lock = None
+        if self._file_log_handler is not None:
+            shutdown_file_logging(self._file_log_handler)
+            self._file_log_handler = None
         if failure is not None:
             raise failure
         return interrupted
