@@ -48,3 +48,9 @@ Authorization scheme redaction, and added controlled `ppt_agent` logger-level
 setup/restoration so inherited INFO records are captured without changing the
 global root logger threshold. Verification: focused logger/runtime tests ->
 `6 passed`.
+
+## Review fix round 3
+
+Authorization redaction now accepts HTTP scheme tokens containing digits and
+hyphens (for example `AWS4-HMAC-SHA256` and `Foo-1`). Message and exception
+regressions cover these schemes. Focused logger/runtime tests: `6 passed`.
