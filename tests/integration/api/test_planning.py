@@ -233,6 +233,7 @@ def test_planning_projection_exposes_only_durable_refs_and_status() -> None:
     assert response.json() == {
         "run_id": run.id,
         "status": "queued",
+        "error": None,
         "input_generation": 1,
         "brief_ref": None,
         "outline_ref": None,
@@ -242,6 +243,54 @@ def test_planning_projection_exposes_only_durable_refs_and_status() -> None:
     }
     assert "api_key" not in response.text
     assert "response" not in response.text
+
+
+def test_planning_projection_exposes_only_safe_run_failure_error() -> None:
+    engine, app, store, _, project_id, _, _ = setup_api()
+    try:
+        run = store.create_run(project_id, (), "Roadmap")
+        step = store.next_step(run.id)
+        store.repository.transition_run(run.id, RunEvent.DISPATCHED)
+        store.repository.transition_step(step.step_id, StepEvent.STARTED)
+        store.repository.transition_step(
+            step.step_id,
+            StepEvent.FAILED,
+            payload={
+                "error": {
+                    "code": "authorization=Bearer secret",
+                    "provider_summary": {
+                        "http_status": 400,
+                        "provider_error_type": "api_key=secret",
+                        "prompt": "private source text",
+                    },
+                }
+            },
+        )
+        store.repository.transition_run(
+            run.id,
+            RunEvent.UNRECOVERABLE_FAILURE,
+            payload={
+                "error": {
+                    "code": "authorization=Bearer secret",
+                    "provider_summary": {"http_status": 400},
+                }
+            },
+        )
+        response = request(
+            app,
+            "GET",
+            f"/api/v1/runs/{run.id}/planning",
+            headers={"host": "localhost:8000", "authorization": f"Bearer {TOKEN}"},
+        )
+    finally:
+        engine.dispose()
+
+    assert response.status_code == 200
+    assert response.json()["error"] == {
+        "code": "unknown_provider_error",
+        "provider_summary": {"http_status": 400},
+    }
+    assert "secret" not in response.text
 
 
 def setup_material_planning_api(tmp_path: Path, *, limits: InputLimits | None = None):

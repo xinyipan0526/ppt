@@ -21,6 +21,7 @@ from ppt_agent.domain.state_machine import (
     transition_step,
 )
 from ppt_agent.events.persistence import append_event_record
+from ppt_agent.operations.provider import safe_provider_failure_error
 from ppt_agent.storage.database import SessionFactory, session_scope
 from ppt_agent.storage.models import (
     ProjectRecord,
@@ -50,6 +51,7 @@ class RunSnapshot:
     workflow_name: str
     workflow_version: int
     status: RunStatus
+    error: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -291,6 +293,7 @@ class WorkflowRepository:
             record.status = next_status
             event_payload = dict(payload or {})
             if "error" in event_payload:
+                event_payload["error"] = safe_provider_failure_error(event_payload["error"])
                 record.error = event_payload["error"]
             event_payload.update({"step_id": step_id, "status": next_status.value})
             self._append_event(
@@ -410,6 +413,7 @@ class WorkflowRepository:
             record.status = next_status
             event_payload = dict(payload or {})
             if "error" in event_payload:
+                event_payload["error"] = safe_provider_failure_error(event_payload["error"])
                 record.error = event_payload["error"]
             event_payload["status"] = next_status.value
             self._append_event(
@@ -540,6 +544,7 @@ class WorkflowRepository:
             workflow_name=record.workflow_name,
             workflow_version=record.workflow_version,
             status=record.status,
+            error=record.error,
         )
 
     @staticmethod

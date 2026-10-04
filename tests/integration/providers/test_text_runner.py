@@ -14,6 +14,7 @@ from ppt_agent.operations.provider import (
     PrepareAttempt,
     ProviderOperationService,
     RetryRiskConfirmationRequired,
+    safe_provider_failure_summary,
 )
 from ppt_agent.operations.text_runner import TextOperationRunner, TextPricing
 from ppt_agent.providers.text import (
@@ -92,6 +93,30 @@ PRICING = TextPricing(
     input_per_million=1_000_000,
     output_per_million=2_000_000,
 )
+
+
+def test_provider_failure_summary_allowlists_normalized_metadata() -> None:
+    assert safe_provider_failure_summary(
+        {
+            "http_status": 429,
+            "provider_error_type": "rate_limited",
+            "exception_type": "ReadError",
+        }
+    ) == {
+        "http_status": 429,
+        "provider_error_type": "rate_limited",
+        "exception_type": "ReadError",
+    }
+    assert safe_provider_failure_summary(
+        {
+            "http_status": 400,
+            "provider_error_type": "api_key=secret",
+            "exception_type": "CredentialException",
+        }
+    ) == {"http_status": 400}
+    assert safe_provider_failure_summary(
+        {"provider_error_type": ["rate_limited"], "exception_type": {"secret": 1}}
+    ) == {}
 
 
 def success(value: dict[str, object] | None = None) -> StructuredTextResult:

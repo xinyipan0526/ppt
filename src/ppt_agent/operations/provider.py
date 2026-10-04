@@ -2,7 +2,6 @@
 
 from dataclasses import dataclass
 from datetime import UTC, datetime
-import re
 from typing import Any
 from uuid import uuid4
 
@@ -143,7 +142,43 @@ NONTERMINAL_ATTEMPT_STATUSES = {
     AttemptStatus.CANCEL_REQUESTED,
 }
 
-_SAFE_PROVIDER_SUMMARY_STRING = re.compile(r"[A-Za-z_][A-Za-z0-9_.-]{0,127}")
+_SAFE_PROVIDER_ERROR_CODES = frozenset(
+    {
+        "invalid_request",
+        "authentication_error",
+        "insufficient_balance",
+        "rate_limited",
+        "temporary_unavailable",
+        "content_rejected",
+        "operation_not_found",
+        "result_expired",
+        "partial_success",
+        "unknown_remote_outcome",
+        "invalid_provider_result",
+        "unknown_provider_error",
+    }
+)
+_SAFE_PROVIDER_EXCEPTION_TYPES = frozenset(
+    {
+        "RequestError",
+        "TransportError",
+        "NetworkError",
+        "ProtocolError",
+        "TimeoutException",
+        "ConnectTimeout",
+        "ReadTimeout",
+        "WriteTimeout",
+        "PoolTimeout",
+        "ConnectError",
+        "ReadError",
+        "WriteError",
+        "CloseError",
+        "ProxyError",
+        "RemoteProtocolError",
+        "UnsupportedProtocol",
+        "DecodingError",
+    }
+)
 
 
 def safe_provider_failure_summary(summary: dict[str, Any] | None) -> dict[str, int | str]:
@@ -155,11 +190,29 @@ def safe_provider_failure_summary(summary: dict[str, Any] | None) -> dict[str, i
     status = summary.get("http_status")
     if isinstance(status, int) and not isinstance(status, bool) and 100 <= status <= 599:
         safe["http_status"] = status
-    for key in ("provider_error_type", "exception_type"):
-        value = summary.get(key)
-        if isinstance(value, str) and _SAFE_PROVIDER_SUMMARY_STRING.fullmatch(value):
-            safe[key] = value
+    error_type = summary.get("provider_error_type")
+    if isinstance(error_type, str) and error_type in _SAFE_PROVIDER_ERROR_CODES:
+        safe["provider_error_type"] = error_type
+    exception_type = summary.get("exception_type")
+    if isinstance(exception_type, str) and exception_type in _SAFE_PROVIDER_EXCEPTION_TYPES:
+        safe["exception_type"] = exception_type
     return safe
+
+
+def safe_provider_failure_error(value: object) -> dict[str, object]:
+    """Normalize any durable Provider failure projection to its safe schema."""
+
+    if not isinstance(value, dict):
+        return {"code": "unknown_provider_error", "provider_summary": {}}
+    code = value.get("code")
+    return {
+        "code": (
+            code
+            if isinstance(code, str) and code in _SAFE_PROVIDER_ERROR_CODES
+            else "unknown_provider_error"
+        ),
+        "provider_summary": safe_provider_failure_summary(value.get("provider_summary")),
+    }
 
 
 class ProviderOperationService:

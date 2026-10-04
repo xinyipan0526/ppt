@@ -352,6 +352,7 @@ def test_known_provider_failure_projects_only_safe_error_on_step_and_run(caplog)
         if record.name == "ppt_agent.workflows.deck_planning"
     ]
     assert [record.getMessage() for record in records] == ["step.failed", "run.failed"]
+    assert [record.event_type for record in records] == ["step.failed", "run.failed"]
     assert all(record.error_code == "invalid_request" for record in records)
     assert all(record.http_status == 400 for record in records)
 

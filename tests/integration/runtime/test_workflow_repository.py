@@ -1,9 +1,16 @@
 from pathlib import Path
 from uuid import uuid4
 
+import json
+
 import pytest
 
-from ppt_agent.domain.state_machine import InvalidTransition, RunEvent, RunStatus
+from ppt_agent.domain.state_machine import (
+    InvalidTransition,
+    RunEvent,
+    RunStatus,
+    StepEvent,
+)
 from ppt_agent.runtime.repository import WorkflowRepository
 from ppt_agent.storage.database import (
     DatabaseConfig,
@@ -80,3 +87,35 @@ def test_invalid_transition_leaves_state_and_event_log_unchanged() -> None:
     assert unchanged.status is RunStatus.QUEUED
     assert len(events) == 1
 
+
+def test_failure_error_is_sanitized_before_step_run_and_event_persistence() -> None:
+    repository, engine = create_repository()
+    try:
+        project_id = repository.create_project("Annual report")
+        run = repository.create_run(project_id, "deck_generation", 1)
+        step = repository.create_step(run.id, "build_brief", "build-brief-1")
+        repository.transition_run(run.id, RunEvent.DISPATCHED)
+        repository.transition_step(step.id, StepEvent.STARTED)
+        unsafe = {
+            "code": "authorization=Bearer secret",
+            "provider_summary": {
+                "http_status": 400,
+                "provider_error_type": "api_key=secret",
+                "exception_type": "CredentialException",
+                "prompt": "private source text",
+            },
+        }
+        repository.transition_step(step.id, StepEvent.FAILED, payload={"error": unsafe})
+        repository.transition_run(
+            run.id, RunEvent.UNRECOVERABLE_FAILURE, payload={"error": unsafe}
+        )
+        persisted_run = repository.get_run(run.id)
+        events = repository.list_events(run.id)
+    finally:
+        engine.dispose()
+
+    expected = {"code": "unknown_provider_error", "provider_summary": {"http_status": 400}}
+    assert persisted_run.error == expected
+    assert events[-2].payload["error"] == expected
+    assert events[-1].payload["error"] == expected
+    assert "secret" not in json.dumps([event.payload for event in events])

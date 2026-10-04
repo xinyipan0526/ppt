@@ -170,7 +170,9 @@ class DeckPlanningWorkflow:
                     )
                     logger.error(
                         "step.failed",
-                        extra=self._failure_log_context(run_id, step, exc),
+                        extra=self._failure_log_context(
+                            run_id, step, exc, event_type="step.failed"
+                        ),
                     )
                     self.store.repository.transition_run(
                         run_id,
@@ -179,7 +181,9 @@ class DeckPlanningWorkflow:
                     )
                     logger.error(
                         "run.failed",
-                        extra=self._failure_log_context(run_id, step, exc),
+                        extra=self._failure_log_context(
+                            run_id, step, exc, event_type="run.failed"
+                        ),
                     )
                 return
 
@@ -686,7 +690,12 @@ class DeckPlanningWorkflow:
         return tuple(pages[index - 1] for index in indexes)
 
     def _failure_log_context(
-        self, run_id: str, step: PlanningStep, error: ProviderCallError
+        self,
+        run_id: str,
+        step: PlanningStep,
+        error: ProviderCallError,
+        *,
+        event_type: str,
     ) -> dict[str, int | str]:
         run = self.store.repository.get_run(run_id)
         return {
@@ -698,6 +707,7 @@ class DeckPlanningWorkflow:
             "model": self._model,
             "status": "failed",
             "error_code": error.code,
+            "event_type": event_type,
             **safe_provider_failure_summary(error.safe_summary),
         }
 

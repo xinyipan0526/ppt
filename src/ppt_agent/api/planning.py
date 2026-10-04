@@ -196,6 +196,7 @@ def planning_router(
         return {
             "run_id": run.id,
             "status": run.status.value,
+            "error": run.error,
             "input_generation": planning_input.generation,
             "brief_ref": _single_ref(brief),
             "outline_ref": _single_ref(outline),
