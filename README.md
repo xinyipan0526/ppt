@@ -3,7 +3,8 @@
 > 当前版本已经交付完整的同源 React 产品工作台与生产级后端。安装后运行
 > `ppt-agent serve`，浏览器会自动打开 `http://localhost:8000/`；无需 Node.js。
 > 无 API Key 时使用确定性模式完整试跑，正式使用可在“模型设置”中安全配置
-> DeepSeek、Seedream 与 Qwen。密钥不会进入浏览器存储、数据库、事件或 API 响应。
+> 一个火山方舟 API Key、一个多模态模型和一个图片模型。密钥不会进入浏览器存储、
+> 数据库、事件或 API 响应；价格、端点与结果域名均有目录默认值，无需用户填写。
 
 使用入口：[快速开始](docs/quickstart.md) · [配置说明](docs/configuration.md) ·
 [云 Provider 设置](docs/provider-setup.md) · [产品 UI 教程](docs/ui-guide.md) ·
@@ -15,7 +16,7 @@
 
 本项目不是一次性的能力演示。设计目标是构建一个关注生成效果、成本、稳定性、可观测性和可恢复性的生产级本地应用。
 
-> 当前产品已完整支持可恢复规划、素材解析、DeepSeek/Seedream/Qwen 云调用、确定性排版、视觉/OCR 质检、自然语言单页编辑，以及 PNG/JPG/ZIP/PDF/图片型 PPTX 导出；无 Key 的确定性模式可运行完整闭环。React 工作台与后端由 FastAPI 同源交付。进度检查点以 [AGENTS.md](AGENTS.md) 为准。
+> 当前产品已完整支持可恢复规划、素材解析、火山方舟 Doubao Seed/Seedream 云调用、确定性排版、视觉/OCR 质检、自然语言单页编辑，以及 PNG/JPG/ZIP/PDF/图片型 PPTX 导出；无 Key 的确定性模式可运行完整闭环。React 工作台与后端由 FastAPI 同源交付。进度检查点以 [AGENTS.md](AGENTS.md) 为准。
 
 快速上手：[本机与 Docker 启动](docs/quickstart.md) · [配置参考](docs/configuration.md) · [云 Provider](docs/provider-setup.md) · [HTTP API 教程](docs/api-tutorial.md)
 
@@ -274,28 +275,25 @@ Model Gateway
   └── OCRProvider
 ```
 
-首版 Provider：
+当前首版 Adapter 与模型：
 
-| 能力 | 默认实现 | 说明 |
+| 类别/能力 | 默认实现 | 精确模型 ID |
 |---|---|---|
-| 文本推理与规划 | DeepSeek | OpenAI 兼容文本接口 |
-| 视觉理解与区域定位 | Qwen 云端 API | 默认视觉 Provider |
-| 视觉理解备选 | 豆包多模态 API | 用户可配置为默认或备用 |
-| 图片生成与编辑 | Seedream | 支持参考图和图像编辑 |
-| OCR | PaddleOCR | 本地执行，承担文字识别与定位 |
+| 多模态：规划、图片理解、定位、OCR | Doubao Seed 2.1 Pro（推荐） | `doubao-seed-2-1-pro-260915` |
+| 多模态：同上、低成本选项 | Doubao Seed 2.1 Lite | `doubao-seed-2-1-lite-260915` |
+| 图片生成与参考图编辑 | Doubao Seedream 5.0 Pro | `doubao-seedream-5-0-pro-260628` |
 
-模型 ID、Base URL、超时、价格和能力由配置注册表管理。业务代码只请求 `text.reasoning`、`vision.locate`、`image.generate` 或 `image.edit` 等能力。
+首版只开放火山方舟 `volcengine_ark` Adapter。模型 ID、Base URL、结果 Host、价格和能力由版本化模型目录管理；用户只需一个方舟 Key 并选择两类模型。业务代码只请求 `text.reasoning`、`vision.locate`、`ocr.recognize`、`image.generate` 或 `image.edit` 等能力。
 
 每个模型版本还必须声明 `ProviderCapabilities`，包括同步/异步模式、幂等键、查询与取消支持、输入数量和格式上限、Mask/线框/涂鸦语义、内容安全错误、结构化输出子集、计价单位、地域和数据保留策略。Workflow 先协商能力，再选择提交、降级或中断路径，不能假设同一 Protocol 的所有实现具有相同语义。
 
 所有可能计费的远端调用使用稳定的 `operation_id`、逐次 `attempt_id` 和显式远端状态机。详细定义见 [Provider 能力与远端调用恢复协议](docs/specs/03-provider-operations.md)。
 
-首版不默认自动跨供应商回退，避免要求用户配置多套 Key。只有用户同时配置多个 Provider 并主动开启后，才允许执行 fallback。
+首版不自动跨供应商回退。后续增加模型或厂商时，通过新增 Adapter 和目录条目接入，
+不改变 Workflow 的能力协议。
 
 参考资料：
 
-- [Qwen 图像与视频理解](https://help.aliyun.com/zh/model-studio/vision)
-- [Qwen 结构化输出](https://docs.modelstudio.console.alibabacloud.com/en/model-studio/qwen-structured-output)
 - [Seedream 4.0–5.0 提示词指南](https://www.volcengine.com/docs/82379/1829186)
 
 ## 8. 工具与 Skill
@@ -642,10 +640,12 @@ ppt-agent/
 
 首版同时支持两种方式，并共用配置模型、数据目录和数据库迁移：
 
-1. 普通用户使用 Docker Compose 一条命令启动。
-2. 开发者分别启动 Python API 和前端开发服务器，支持热更新。TaskSupervisor 随 API lifespan 启动。
+1. 普通用户使用原生 Python 安装或 Docker Compose 启动；正式包同源提供 React 静态资源。
+2. 开发者分别启动 Python API 和 Vite 开发服务器；Vite 前端支持热更新，Python 后端改动需要重启或显式 reload。TaskSupervisor 随 API lifespan 启动。
 
-CI 同时验证原生开发启动路径和 Docker 构建。桌面应用或独立安装包属于后续规划。
+`pip install .`/wheel 安装会把 Python 代码与 Web 构建产物复制到环境中，仓库修改不会
+实时进入已安装程序；更新后必须重新构建/安装并重启服务。CI 同时验证原生开发启动
+路径和 Docker 构建。桌面应用或独立安装包属于后续规划。
 
 ## 18. 核心难点
 

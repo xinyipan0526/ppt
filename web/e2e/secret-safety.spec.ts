@@ -1,57 +1,101 @@
 import { expect, test } from "@playwright/test";
 
-test("provider secrets leave no browser-persistent or rendered trace", async ({ page }) => {
-  const secrets = ["deepseek-e2e-secret", "seedream-e2e-secret", "qwen-e2e-secret"];
-  let submittedBody = "";
+test("Ark secret leaves no browser-persistent or rendered trace", async ({ page }) => {
+  const secret = "ark-e2e-secret";
+  const submittedBodies: string[] = [];
   const consoleLines: string[] = [];
   page.on("console", (message) => consoleLines.push(message.text()));
-  const safeSnapshot = {
+
+  const catalog = [
+    {
+      adapter_id: "volcengine_ark",
+      model_id: "doubao-seed-2-1-pro-260915",
+      display_name: "Doubao Seed 2.1 Pro",
+      category: "multimodal",
+      lifecycle: "stable",
+      capabilities: ["text.reasoning", "vision.analyze", "vision.locate", "ocr.recognize"],
+      recommended: true,
+      pricing: { currency: "CNY", version: "official-cn-2026-10-03" },
+    },
+    {
+      adapter_id: "volcengine_ark",
+      model_id: "doubao-seed-2-1-lite-260915",
+      display_name: "Doubao Seed 2.1 Lite",
+      category: "multimodal",
+      lifecycle: "stable",
+      capabilities: ["text.reasoning", "vision.analyze", "vision.locate", "ocr.recognize"],
+      recommended: false,
+      pricing: { currency: "CNY", version: "official-cn-2026-10-03" },
+    },
+    {
+      adapter_id: "volcengine_ark",
+      model_id: "doubao-seedream-5-0-pro-260628",
+      display_name: "Doubao Seedream 5.0 Pro",
+      category: "image",
+      lifecycle: "stable",
+      capabilities: ["image.generate", "image.edit"],
+      recommended: true,
+      pricing: { currency: "CNY", version: "official-cn-2026-10-03" },
+    },
+  ];
+  const savedSnapshot = {
     mode: "cloud",
     activation: "active",
-    pricing_version: "official-current",
-    seedream_result_hosts: ["ark-content-generation-cn-beijing.tos-cn-beijing.volces.com"],
-    pricing_currency: "CNY",
-    deepseek_input_per_million: 1,
-    deepseek_output_per_million: 1,
-    seedream_per_image: 1,
-    qwen_input_per_million: 1,
-    qwen_output_per_million: 1,
-    providers: {
-      deepseek: { configured: true, backend: "workspace_secret_file", masked_suffix: "cret" },
-      seedream: { configured: true, backend: "workspace_secret_file", masked_suffix: "cret" },
-      qwen: { configured: true, backend: "workspace_secret_file", masked_suffix: "cret" },
-    },
+    adapter_id: "volcengine_ark",
+    adapter_status: { configured: true, backend: "workspace_secret_file" },
+    multimodal_model: catalog[0],
+    image_model: catalog[2],
+    configuration_version: 2,
+    pricing_overrides: {},
+    legacy_configuration_detected: false,
   };
-  await page.route("**/api/v1/settings/providers", async (route) => {
-    if (route.request().method() === "GET") {
-      await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(safeSnapshot) });
+  const emptySnapshot = {
+    ...savedSnapshot,
+    mode: "deterministic",
+    adapter_status: { configured: false, backend: "workspace_secret_file" },
+    multimodal_model: null,
+    image_model: null,
+    configuration_version: 1,
+  };
+
+  await page.route("**/api/v1/model-catalog", (route) => route.fulfill({
+    status: 200,
+    contentType: "application/json",
+    body: JSON.stringify(catalog),
+  }));
+  await page.route("**/api/v1/settings/model-runtime", async (route) => {
+    if (route.request().method() === "PUT") {
+      submittedBodies.push(route.request().postData() ?? "");
+      await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(savedSnapshot) });
       return;
     }
-    submittedBody = route.request().postData() ?? "";
-    await route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify(safeSnapshot),
-    });
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(emptySnapshot) });
+  });
+  await page.route("**/api/v1/adapters/volcengine_ark/test", async (route) => {
+    submittedBodies.push(route.request().postData() ?? "");
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ status: "ok" }) });
   });
 
   await page.goto("/settings");
-  const inputs = page.getByPlaceholder("留空则保持现有密钥");
-  await expect(inputs).toHaveCount(3);
-  for (let index = 0; index < secrets.length; index += 1) await inputs.nth(index).fill(secrets[index]);
-  await page.getByRole("button", { name: "保存并启用" }).click();
+  const input = page.getByLabel("火山方舟 API Key");
+  await expect(input).toHaveCount(1);
+  await expect(page.getByLabel("多模态语言模型")).toHaveValue("doubao-seed-2-1-pro-260915");
+  await expect(page.getByLabel("图片生成模型")).toHaveValue("doubao-seedream-5-0-pro-260628");
+  await input.fill(secret);
+  await page.getByRole("button", { name: "测试并启用" }).click();
   await expect(page.getByText(/设置已安全保存/)).toBeVisible();
-  for (let index = 0; index < secrets.length; index += 1) await expect(inputs.nth(index)).toHaveValue("");
+  await expect(input).toHaveValue("");
 
-  expect(submittedBody).toContain(secrets[0]);
+  expect(submittedBodies).toHaveLength(2);
+  expect(submittedBodies.every((body) => body.includes(secret))).toBe(true);
+  expect(submittedBodies.every((body) => body.includes("doubao-seed-2-1-pro-260915"))).toBe(true);
+  expect(submittedBodies.every((body) => body.includes("doubao-seedream-5-0-pro-260628"))).toBe(true);
   const browserState = await page.evaluate(() => ({
     local: Object.entries(localStorage),
     session: Object.entries(sessionStorage),
     url: location.href,
     html: document.documentElement.textContent ?? "",
   }));
-  for (const secret of secrets) {
-    expect(JSON.stringify(browserState)).not.toContain(secret);
-    expect(consoleLines.join("\n")).not.toContain(secret);
-  }
+  expect(JSON.stringify(browserState)).not.toContain(secret);
+  expect(consoleLines.join("\n")).not.toContain(secret);
 });

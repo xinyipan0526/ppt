@@ -45,7 +45,9 @@ docs/specs/          # 已确认的正式技术协议
 - 首版不引入独立 Worker、Redis、Celery、RabbitMQ、租约或 heartbeat。
 - 浏览器断开不取消后台任务；FastAPI lifespan 内的 TaskSupervisor 负责进程内任务。
 - 顶层使用确定性 Workflow；受限 ReAct 用于局部开放问题；局部编辑使用 Sub-workflow 或 Sub-agent。
-- 文本模型首版适配 DeepSeek；图片模型首版适配 Seedream；视觉理解优先使用 Qwen 云 API，并预留豆包适配。
+- 模型调用按“多模态语言模型”和“图片模型”两类能力抽象；两类各有至少一个模型即可执行任务。
+- 首版统一使用火山方舟 Adapter：Doubao Seed 2.1 承担规划、视觉理解、定位和 OCR，Seedream 5.0 Pro 承担图片生成与编辑；后续模型通过新增 Adapter/目录条目接入。
+- 用户必填项只有一个火山方舟 API Key、一个多模态模型 ID 和一个图片模型 ID；价格、端点和结果 Host 来自版本化模型目录。
 - Provider 必须通过统一能力适配层接入，不能让 Workflow 假设所有 Provider 语义相同。
 - 远端调用使用 Operation/Attempt 两层状态，`outcome_unknown` 不得自动重发。
 - 所有昂贵调用先进行 SQLite 原子预算预留；未知结果的预算预留不能自动释放。
@@ -129,10 +131,16 @@ git status --short
 | `34ca108` | React 产品工作台设计与实施计划 |
 | `9b25d73` | HttpOnly 浏览器会话、CSRF 与安全 Provider 配置 |
 | `bfdb0f6` | 不可变 Deck/Page generation 工作台投影与恢复 API |
+| `28fa1d0` | 版本化火山方舟模型目录与精确模型 ID |
+| `ff9234a` | 方舟多模态语言模型 Adapter |
+| `890fb20` | Seedream 5.0 分档计费与参考图计价 |
+| `3285199` | 单方舟 Key、双模型 ID 云运行时配置 |
+| `c797d95` | 按 Provider 能力组合全部 Workflow |
+| `6f551bf` | 目录驱动的模型设置 API 与 React 下拉体验 |
 
 截至当前产品里程碑：
 
-- Python 全量测试为 `388 passed, 6 skipped`；三项跳过来自当前 Windows 账户无法创建符号链接/目录链接，三项为默认关闭的 DeepSeek、Seedream、Qwen 真实计费测试。React 为 `9 passed`，Chromium 产品 E2E 为 `2 passed`。
+- Python 全量测试为 `434 passed, 6 skipped`；三项跳过来自当前 Windows 账户无法创建符号链接/目录链接，三项为默认关闭的历史 Provider 真实计费测试。React 为 `10 passed`，Chromium 产品 E2E 为 `2 passed`。
 - 事件序号通过 Run 行上的原子 `UPDATE ... RETURNING` 分配。
 - 状态变化与核心事件在同一事务提交。
 - SSE 支持一致快照、`Last-Event-ID`、游标过期和有界批量读取。
@@ -169,7 +177,7 @@ git status --short
 - 确定性 API 端到端测试覆盖项目、规划复核、8 页生产、单页编辑、PPTX 导出、下载与 Range；真实 Provider 测试必须显式打开独立开关。
 - React 工作台已同源打包进 Python wheel，覆盖项目创建、素材上传、类型化澄清、逐页规划复核、任务恢复、完整 PPT 画廊、单页重生成、局部编辑、历史恢复、全局重生成和 PPTX/PDF/PNG ZIP/JPG ZIP 导出。
 - 浏览器认证使用 HttpOnly/SameSite=Strict 会话 Cookie 与内存 CSRF Token；API Key 成功提交后清空，禁止进入 localStorage、sessionStorage、URL、Query Cache、DOM、日志和响应。Bearer Token 接口继续保留给自动化客户端。
-- Provider 配置由本地 UI 写入 Workspace Secret 文件和非密钥 JSON；运行时空闲时热切换，忙碌时标记 pending。CLI 不再输出访问令牌，`ppt-agent serve` 默认打开同源 UI。
+- Provider 配置由本地 UI 写入 Workspace Secret 文件和非密钥 JSON；只要求一个方舟 Key 与两个目录模型 ID，运行时空闲时热切换，忙碌时标记 pending。CLI 不再输出访问令牌，`ppt-agent serve` 默认打开同源 UI。
 - SSE 命名事件驱动工作台刷新，断线后由持久化 snapshot 与有界轮询兜底；浏览器状态不复制后端 Workflow 状态机。
 - 正式构建使用 Node 阶段生成静态资源，运行时不需要 Node.js；wheel 已验证包含 `static/index.html` 与带内容哈希的 CSS/JS。
 
@@ -177,7 +185,7 @@ git status --short
 
 一期完整产品已经交付。下一开发批次应进入 **发布与真实环境验收**：
 
-- 在用户明确授权产生费用后，按账号区域分别运行 DeepSeek、Seedream、Qwen live smoke tests，并记录实际模型 ID、价格单位与结果 Host。
+- 在用户明确授权产生费用后，运行方舟 Doubao Seed 2.1 与 Seedream 5.0 Pro live smoke tests，并按账号区域复核目录价格与结果 Host。
 - 在 Windows 开发者模式和 Linux CI 各跑一次全量套件，补齐当前被权限跳过的链接边界测试。
 - 制作版本化安装包/镜像并执行全新 Workspace 安装、升级、备份恢复和浏览器兼容性验收。
 - 继续保持图片型 PPTX 边界；元素级编辑、画布框选/涂抹、云端多租户仍属于二期，不应混入发布修复。
@@ -191,7 +199,7 @@ git status --short
 - 当前 Windows 测试环境不能创建符号链接；在具备开发者模式或 CI 权限的 Windows 环境中仍需运行 link/junction 用例。
 - React 前端已实现并通过真实 Chromium 确定性闭环；尚未在 Safari/Firefox 与移动端做正式兼容性认证，当前产品定位为桌面浏览器工作台。
 - `src/ppt_agent/api/app.py` 中的模块级 `app` 仍是无配置骨架，正式运行必须使用 `ppt-agent serve`，它会加载配置并调用完整 composition root。
-- 真实云 smoke test 默认关闭且会产生费用；只有显式设置对应 `LIVE_*` 开关与完整凭据时才运行。正式使用前还应按账号所在区域核对模型 ID、价格和 Seedream 结果 Host allowlist。
+- 真实云 smoke test 默认关闭且会产生费用；只有显式设置对应 `LIVE_*` 开关与完整凭据时才运行。正式使用前还应按账号所在区域核对目录中的模型 ID、价格和 Seedream 结果 Host allowlist。
 - Windows 子进程解析无法提供 POSIX `rlimit` 同等级资源约束；生产环境优先使用容器/Linux。当前 Windows 账户无符号链接权限，因此 link/junction 用例仍需在 CI 或开发者模式下运行。
 - FastAPI/Starlette 测试依赖目前产生 `httpx`/AnyIO 弃用警告，不影响运行，但升级依赖时应迁移到其建议的新 TestClient/BlockingPortal 接口。
 

@@ -35,6 +35,36 @@ def provider_settings_router(
 ) -> APIRouter:
     router = APIRouter(prefix="/api/v1", dependencies=[Depends(security.authenticate)])
 
+    async def qualify(request: ModelRuntimeUpdate) -> dict[str, object]:
+        DEFAULT_MODEL_CATALOG.require(
+            request.multimodal_model_id, ModelCategory.MULTIMODAL
+        )
+        DEFAULT_MODEL_CATALOG.require(request.image_model_id, ModelCategory.IMAGE)
+        candidate_key = (
+            request.ark_api_key.get_secret_value()
+            if request.ark_api_key is not None
+            else service.secrets.load(ARK_ADAPTER_ID) or service.settings.ark_api_key
+        )
+        if not candidate_key:
+            raise SettingsError("Ark API key is required")
+        if connection_test is None:
+            return {"status": "configuration_valid"}
+        return await connection_test(
+            candidate_key,
+            request.multimodal_model_id,
+            request.image_model_id,
+        )
+
+    def safe_connection_code(exc: Exception) -> str:
+        safe_codes = {
+            "authentication_error",
+            "model_unavailable",
+            "capability_mismatch",
+            "unknown_remote_outcome",
+        }
+        code = getattr(exc, "code", "unknown_remote_outcome")
+        return code if code in safe_codes else "unknown_remote_outcome"
+
     @router.get("/model-catalog")
     async def get_model_catalog() -> tuple[dict[str, object], ...]:
         return DEFAULT_MODEL_CATALOG.public_snapshot()
@@ -46,6 +76,7 @@ def provider_settings_router(
     @router.put("/settings/model-runtime")
     async def update_settings(request: ModelRuntimeUpdate) -> dict[str, object]:
         try:
+            await qualify(request)
             snapshot = service.update(
                 ark_api_key=(
                     request.ark_api_key.get_secret_value()
@@ -61,6 +92,10 @@ def provider_settings_router(
             raise HTTPException(
                 status_code=422,
                 detail={"code": "model_runtime_invalid", "message": str(exc)},
+            ) from exc
+        except Exception as exc:
+            raise HTTPException(
+                status_code=502, detail={"code": safe_connection_code(exc)}
             ) from exc
 
     @router.delete("/adapters/{adapter_id}/credential")
@@ -79,26 +114,7 @@ def provider_settings_router(
         if adapter_id != ARK_ADAPTER_ID:
             raise HTTPException(status_code=404, detail="adapter not found")
         try:
-            DEFAULT_MODEL_CATALOG.require(
-                request.multimodal_model_id, ModelCategory.MULTIMODAL
-            )
-            DEFAULT_MODEL_CATALOG.require(
-                request.image_model_id, ModelCategory.IMAGE
-            )
-            candidate_key = (
-                request.ark_api_key.get_secret_value()
-                if request.ark_api_key is not None
-                else service.secrets.load(ARK_ADAPTER_ID) or service.settings.ark_api_key
-            )
-            if not candidate_key:
-                raise SettingsError("Ark API key is required")
-            if connection_test is None:
-                return {"adapter_id": adapter_id, "status": "configuration_valid"}
-            result = await connection_test(
-                candidate_key,
-                request.multimodal_model_id,
-                request.image_model_id,
-            )
+            result = await qualify(request)
             return {"adapter_id": adapter_id, **result}
         except (SettingsError, ValueError, KeyError) as exc:
             raise HTTPException(
@@ -106,16 +122,9 @@ def provider_settings_router(
                 detail={"code": "capability_mismatch", "message": str(exc)},
             ) from exc
         except Exception as exc:
-            safe_codes = {
-                "authentication_error",
-                "model_unavailable",
-                "capability_mismatch",
-                "unknown_remote_outcome",
-            }
-            code = getattr(exc, "code", "unknown_remote_outcome")
-            if code not in safe_codes:
-                code = "unknown_remote_outcome"
-            raise HTTPException(status_code=502, detail={"code": code}) from exc
+            raise HTTPException(
+                status_code=502, detail={"code": safe_connection_code(exc)}
+            ) from exc
 
     @router.api_route("/settings/providers", methods=["GET", "PUT"])
     async def deprecated_provider_settings() -> None:

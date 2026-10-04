@@ -40,7 +40,8 @@ Get-Process ppt-agent -ErrorAction SilentlyContinue | Stop-Process -Force
 ## 第一次制作 PPT
 
 1. 打开“模型设置”。试用可保持确定性模式；正式生成按
-   [Provider 设置](provider-setup.md)配置三组 Key 和价格。
+   [Provider 设置](provider-setup.md)填写一个火山方舟 API Key，并从下拉列表选择一个
+   多模态语言模型和一个图片模型。价格、端点与结果域名已有安全默认值，不要求填写。
 2. 回到“项目”，创建项目。
 3. 上传 Markdown、PDF、PNG、JPEG 或 WebP，也可以直接填写创作意图。
 4. 回答必要的澄清问题；在规划复核页修改每一页内容与设计方向。
@@ -71,3 +72,7 @@ npm run dev
 
 Vite 开发服务代理 `/api` 到 `127.0.0.1:8000`。生产使用前执行 `npm run build`，
 并将 `web/dist` 内容同步到 `src/ppt_agent/static`；仓库已提交可直接打包的构建产物。
+
+源码开发时，Vite 页面改动会热更新；Python 后端改动需要重启后端（除非使用显式的
+reload 启动方式）。通过 `pip install .` 安装的正式版本不会读取仓库源码：拉取更新后
+必须重新构建/安装并重启 `ppt-agent serve`，浏览器刷新后才会使用新的后端与静态资源。

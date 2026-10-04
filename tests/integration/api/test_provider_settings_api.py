@@ -70,6 +70,7 @@ def test_model_runtime_accepts_only_key_and_exact_model_ids_without_disclosure(
     assert response.json()["multimodal_model"]["model_id"] == MULTIMODAL
     assert response.json()["image_model"]["model_id"] == IMAGE
     assert "ark-browser-secret" not in combined
+    assert app.state.tested == [("ark-browser-secret", MULTIMODAL, IMAGE)]
     assert service.secrets.load("volcengine_ark") == "ark-browser-secret"
 
 
