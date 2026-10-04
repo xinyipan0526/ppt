@@ -40,3 +40,11 @@ Addressed the critical/important findings with regression coverage:
 Verification: `pytest tests/unit/observability/test_logging.py -q` -> `4 passed`; runtime application tests -> `6 passed`.
 
 Deferred minor: no dedicated rollover-volume test was added in this fix round; rotation configuration is covered by handler parameter assertions.
+
+## Review fix round 2
+
+Fixed standalone secret-path redaction without capture-group errors, generalized
+Authorization scheme redaction, and added controlled `ppt_agent` logger-level
+setup/restoration so inherited INFO records are captured without changing the
+global root logger threshold. Verification: focused logger/runtime tests ->
+`6 passed`.

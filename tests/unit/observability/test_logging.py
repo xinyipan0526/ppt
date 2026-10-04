@@ -102,3 +102,19 @@ def test_file_logger_rejects_unbounded_rotation(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError):
         configure_file_logging(tmp_path, max_bytes=10_000, backup_count=0)
+
+
+def test_file_logger_redacts_standalone_secret_paths_and_other_auth_schemes(tmp_path: Path) -> None:
+    handler = configure_file_logging(tmp_path, max_bytes=10_000, backup_count=1)
+    try:
+        logging.getLogger("ppt_agent.inherited").info(
+            "Authorization: Token abc123 secrets/adapter.json prompt=do not leak"
+        )
+        handler.flush()
+        text = (tmp_path / "logs" / "ppt-agent.jsonl").read_text()
+    finally:
+        shutdown_file_logging(handler)
+    assert "abc123" not in text
+    assert "adapter.json" not in text
+    assert "do not leak" not in text
+    assert "Authorization" in text

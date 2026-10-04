@@ -20,7 +20,7 @@ _SENSITIVE_KEY = re.compile(
     re.IGNORECASE,
 )
 _SENSITIVE_TEXT = (
-    re.compile(r"(?i)(authorization\s*:\s*(?:bearer|basic|digest)\s+)[^\s,;]+"),
+    re.compile(r"(?i)(authorization\s*:\s*[A-Za-z]+\s+)[^\s,;]+"),
     re.compile(r"(?i)(\b(?:api[_-]?key|access[_-]?token|password|secret)\s*[=:]\s*)[^\s,;]+"),
     re.compile(r"(?i)(\b(?:prompt|source[_ -]?content)\s*[:=]\s*)[^\n]+"),
     re.compile(r"(?i)(?:(?:[A-Za-z]:)?[\\/][^\s,;]*?(?:\.secrets|secrets)[\\/]|\b(?:\.secrets|secrets)[\\/])[^\s,;]+"),
@@ -29,7 +29,10 @@ _SENSITIVE_TEXT = (
 
 def _redact_text(value: str) -> str:
     for pattern in _SENSITIVE_TEXT:
-        value = pattern.sub(lambda match: f"{match.group(1)}{_REDACTED}", value)
+        value = pattern.sub(
+            lambda match: f"{match.group(1)}{_REDACTED}" if match.lastindex else _REDACTED,
+            value,
+        )
     return value[:_MAX_STRING]
 
 
@@ -91,6 +94,10 @@ def configure_file_logging(
     )
     handler.setLevel(level)
     handler.setFormatter(_JSONFormatter())
+    audit_logger = logging.getLogger("ppt_agent")
+    setattr(handler, "_previous_audit_logger_level", audit_logger.level)
+    previous_level = audit_logger.level
+    audit_logger.setLevel(level if previous_level == logging.NOTSET else min(previous_level, level))
     logging.getLogger().addHandler(handler)
     return handler
 
@@ -99,5 +106,9 @@ def shutdown_file_logging(handler: logging.Handler) -> None:
     """Detach and close a handler previously returned by configure_file_logging."""
     root = logging.getLogger()
     root.removeHandler(handler)
+    audit_logger = logging.getLogger("ppt_agent")
+    previous = getattr(handler, "_previous_audit_logger_level", None)
+    if previous is not None:
+        audit_logger.setLevel(previous)
     handler.flush()
     handler.close()
