@@ -27,3 +27,16 @@ Runtime setup occurs after Alembic migration configuration so migration
 
 - Runtime defaults are currently fixed at 10 MiB per log file and 3 backups; the public logger API accepts explicit rotation settings, but runtime configuration does not yet expose those values.
 - The existing FastAPI/Starlette `httpx` deprecation warning remains unrelated to this task.
+
+## Review fix round
+
+Addressed the critical/important findings with regression coverage:
+
+- Authorization Basic/Digest, ordinary and `.secrets` paths, and prompt/source-content values interpolated into messages are now redacted.
+- Envelope keys cannot be overwritten by extra record attributes.
+- `backup_count` must be positive, preserving bounded rotation semantics.
+- Lifecycle logging remains available after Alembic logger configuration resets.
+
+Verification: `pytest tests/unit/observability/test_logging.py -q` -> `4 passed`; runtime application tests -> `6 passed`.
+
+Deferred minor: no dedicated rollover-volume test was added in this fix round; rotation configuration is covered by handler parameter assertions.

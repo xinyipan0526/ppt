@@ -20,9 +20,10 @@ _SENSITIVE_KEY = re.compile(
     re.IGNORECASE,
 )
 _SENSITIVE_TEXT = (
-    re.compile(r"(?i)(authorization\s*:\s*bearer\s+)[^\s,;]+"),
+    re.compile(r"(?i)(authorization\s*:\s*(?:bearer|basic|digest)\s+)[^\s,;]+"),
     re.compile(r"(?i)(\b(?:api[_-]?key|access[_-]?token|password|secret)\s*[=:]\s*)[^\s,;]+"),
-    re.compile(r"(?i)([\\/]\.secrets[\\/])[^\s,;]+"),
+    re.compile(r"(?i)(\b(?:prompt|source[_ -]?content)\s*[:=]\s*)[^\n]+"),
+    re.compile(r"(?i)(?:(?:[A-Za-z]:)?[\\/][^\s,;]*?(?:\.secrets|secrets)[\\/]|\b(?:\.secrets|secrets)[\\/])[^\s,;]+"),
 )
 
 
@@ -60,7 +61,7 @@ class _JSONFormatter(logging.Formatter):
             "message": _redact_text(record.getMessage()),
         }
         for key, value in record.__dict__.items():
-            if key in _STANDARD_FIELDS or key.startswith("_"):
+            if key in _STANDARD_FIELDS or key in payload or key.startswith("_"):
                 continue
             payload[key] = _safe_value(value, key=key)
         if record.exc_info:
@@ -78,8 +79,8 @@ def configure_file_logging(
     """Attach a bounded, redacting JSONL handler to the process root logger."""
     if max_bytes <= 0:
         raise ValueError("max_bytes must be positive")
-    if backup_count < 0:
-        raise ValueError("backup_count must be non-negative")
+    if backup_count <= 0:
+        raise ValueError("backup_count must be positive")
     logs = Path(workspace) / "logs"
     logs.mkdir(parents=True, exist_ok=True)
     handler = RotatingFileHandler(
@@ -100,4 +101,3 @@ def shutdown_file_logging(handler: logging.Handler) -> None:
     root.removeHandler(handler)
     handler.flush()
     handler.close()
-

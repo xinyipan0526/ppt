@@ -63,3 +63,42 @@ def test_file_logger_sanitizes_exception_text_and_configures_rotation(tmp_path: 
     assert "secret-value" not in record["exception"]
     assert "abc123" not in record["exception"]
     assert "[REDACTED]" in record["exception"]
+
+
+def test_file_logger_redacts_auth_schemes_secret_paths_and_interpolated_content(tmp_path: Path) -> None:
+    handler = configure_file_logging(tmp_path, max_bytes=10_000, backup_count=1)
+    logger = logging.getLogger("test.audit.redaction")
+    logger.setLevel(logging.INFO)
+    try:
+        record = logger.makeRecord(
+            logger.name,
+            logging.INFO,
+            __file__,
+            0,
+            "Authorization: Basic dXNlcjpwYXNz prompt=private words source_content: hidden text secrets/adapter.json",
+            (),
+            None,
+        )
+        record.timestamp = "spoofed"
+        handler.handle(record)
+        handler.flush()
+        text = (tmp_path / "logs" / "ppt-agent.jsonl").read_text()
+        record = json.loads(text)
+    finally:
+        logger.setLevel(logging.NOTSET)
+        shutdown_file_logging(handler)
+
+    assert "dXNlcjpwYXNz" not in text
+    assert "private words" not in text
+    assert "hidden text" not in text
+    assert "adapter.json" not in text
+    assert record["logger"] == "test.audit.redaction"
+    assert record["level"] == "INFO"
+    assert record["timestamp"] != "spoofed"
+
+
+def test_file_logger_rejects_unbounded_rotation(tmp_path: Path) -> None:
+    import pytest
+
+    with pytest.raises(ValueError):
+        configure_file_logging(tmp_path, max_bytes=10_000, backup_count=0)
