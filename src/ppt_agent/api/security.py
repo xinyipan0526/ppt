@@ -136,6 +136,8 @@ class InputLimits:
     max_planning_source_bytes: int = 8 * 1024 * 1024
     max_markdown_nesting: int = 32
     max_external_resources: int = 100
+    max_trace_event_limit: int = 100
+    max_trace_operation_limit: int = 50
     max_compression_ratio: float = 100.0
     parser_timeout_seconds: float = 60.0
 
@@ -154,6 +156,8 @@ class InputLimits:
             self.max_planning_source_bytes,
             self.max_markdown_nesting,
             self.max_external_resources,
+            self.max_trace_event_limit,
+            self.max_trace_operation_limit,
             self.max_compression_ratio,
             self.parser_timeout_seconds,
         )

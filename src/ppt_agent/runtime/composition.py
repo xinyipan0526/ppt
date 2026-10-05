@@ -16,6 +16,7 @@ from ppt_agent.api.providers import providers_router
 from ppt_agent.api.security import AccessTokenManager, InputLimits, LocalHTTPConfig, LocalHTTPSecurity, SecretFileTokenStore
 from ppt_agent.api.settings import provider_settings_router
 from ppt_agent.api.workspace import workspace_router
+from ppt_agent.api.trace import trace_router
 from ppt_agent.config.provider_secrets import FileProviderSecretStore
 from ppt_agent.config.secrets import WorkspaceTokenStore
 from ppt_agent.config.settings import Settings
@@ -229,6 +230,12 @@ def build_application(settings: Settings):
         security=security,
         repository=_Lazy(lambda: runtime.repository),
         supervisor=_Lazy(lambda: runtime.supervisor),
+    ))
+    app.include_router(trace_router(
+        sessions=session_proxy,
+        authorize_run=authorize_run,
+        security=security,
+        input_limits=limits,
     ))
     app.state.settings = settings.redacted()
     app.state.provider_configuration = provider_configuration
