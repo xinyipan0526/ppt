@@ -17,13 +17,15 @@ export function ProjectWorkspace() {
   const cache = useQueryClient();
   const [selectedMaterials, setSelectedMaterials] = useState<string[]>([]);
   const [activeRun, setActiveRun] = useState<string | null>(null);
+  const [dismissedRuns, setDismissedRuns] = useState<string[]>([]);
   const workspace = useQuery({
     queryKey: ["project-workspace", projectId],
     queryFn: () => apiClient.request<ProjectWorkspaceData>(`/api/v1/projects/${projectId}/workspace`),
     refetchInterval: activeRun ? 4_000 : false,
   });
   const inferredRun = activeRun
-    ?? workspace.data?.runs.find((run) => !TERMINAL.has(run.status))?.id
+    ?? workspace.data?.runs.find((run) => !TERMINAL.has(run.status) && !dismissedRuns.includes(run.id))?.id
+    ?? workspace.data?.runs.find((run) => !dismissedRuns.includes(run.id))?.id
     ?? null;
   const snapshot = useQuery({
     queryKey: ["run-snapshot", inferredRun],
@@ -46,7 +48,6 @@ export function ProjectWorkspace() {
 
   useEffect(() => {
     if (activeRun && snapshot.data && TERMINAL.has(snapshot.data.run.status)) {
-      setActiveRun(null);
       void cache.invalidateQueries({ queryKey: ["project-workspace", projectId] });
     }
   }, [activeRun, cache, projectId, snapshot.data]);
@@ -67,16 +68,16 @@ export function ProjectWorkspace() {
       : <div className="workspace-layout">
           <aside className="side-stack">
             <MaterialPanel projectId={projectId} materials={workspace.data.materials} selected={selectedMaterials} onSelected={setSelectedMaterials} />
-            <PlanningInput projectId={projectId} materialIds={selectedMaterials} onCreated={setActiveRun} />
-            {inferredRun && <RunStatus runId={inferredRun} onChange={refresh} />}
+            <PlanningInput projectId={projectId} materialIds={selectedMaterials} onCreated={(runId) => { setDismissedRuns((runs) => runs.filter((id) => id !== runId)); setActiveRun(runId); }} />
+            {inferredRun && <RunStatus runId={inferredRun} onChange={refresh} onDismiss={() => { setDismissedRuns((runs) => [...runs, inferredRun]); if (activeRun === inferredRun) setActiveRun(null); }} />}
           </aside>
           <div>
             {pendingInterrupt && inferredRun
               ? <ClarificationForm runId={inferredRun} interrupt={pendingInterrupt} onDone={refresh} />
               : latestDeck
-                ? <DeckGallery projectId={projectId} deck={latestDeck} onRunCreated={setActiveRun} />
+                ? <DeckGallery projectId={projectId} deck={latestDeck} onRunCreated={(runId) => { setDismissedRuns((runs) => runs.filter((id) => id !== runId)); setActiveRun(runId); }} />
                 : approvedPlanning
-                  ? <ProductionLaunch projectId={projectId} planningRunId={approvedPlanning.id} onCreated={setActiveRun} />
+                  ? <ProductionLaunch projectId={projectId} planningRunId={approvedPlanning.id} onCreated={(runId) => { setDismissedRuns((runs) => runs.filter((id) => id !== runId)); setActiveRun(runId); }} />
                   : <div className="empty"><div><p className="eyebrow">Ready when you are</p><h2>从左侧开始</h2><p>上传资料、描述意图，Agent 会在生成图片前邀请你确认完整页面规划。</p></div></div>}
           </div>
         </div>}
