@@ -17,10 +17,12 @@ from ppt_agent.storage.models import (
     ProviderOperationRecord,
     WorkflowEventRecord,
     WorkflowRunRecord,
+    WorkflowStepRecord,
 )
 
 
 MAX_ATTEMPTS_PER_OPERATION = 20
+MAX_STEPS = 100
 
 
 class RunTraceService:
@@ -49,6 +51,17 @@ class RunTraceService:
                     .where(WorkflowEventRecord.run_id == run_id)
                     .order_by(WorkflowEventRecord.run_seq)
                     .limit(event_limit)
+                )
+            )
+            steps = list(
+                session.scalars(
+                    select(WorkflowStepRecord)
+                    .where(WorkflowStepRecord.run_id == run_id)
+                    .order_by(
+                        WorkflowStepRecord.created_at,
+                        WorkflowStepRecord.id,
+                    )
+                    .limit(MAX_STEPS)
                 )
             )
             operations = list(
@@ -86,6 +99,7 @@ class RunTraceService:
 
             return {
                 "run": _run(run),
+                "steps": [_step(step) for step in steps],
                 "events": [_event(event) for event in events],
                 "operations": [
                     {
@@ -127,6 +141,17 @@ def _event(record: WorkflowEventRecord) -> dict[str, object]:
     }
 
 
+def _step(record: WorkflowStepRecord) -> dict[str, object]:
+    return {
+        "id": record.id,
+        "status": record.status.value,
+        "step_key": record.step_key,
+        "generation": record.generation,
+        "attempt_count": record.attempt_count,
+        "error": None if record.error is None else safe_provider_failure_error(record.error),
+    }
+
+
 def _operation(record: ProviderOperationRecord) -> dict[str, object]:
     return {
         "id": record.id,
@@ -160,4 +185,4 @@ def _datetime(value: datetime | None) -> datetime | None:
     return value.replace(tzinfo=UTC)
 
 
-__all__ = ["MAX_ATTEMPTS_PER_OPERATION", "RunTraceService"]
+__all__ = ["MAX_ATTEMPTS_PER_OPERATION", "MAX_STEPS", "RunTraceService"]

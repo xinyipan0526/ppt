@@ -102,7 +102,14 @@ def setup_trace_api(tmp_path: Path):
                     idempotency_key="trace-step-1",
                     input_refs=None,
                     output_refs=None,
-                    error=None,
+                    error={
+                        "code": "invalid_request",
+                        "provider_summary": {
+                            "http_status": 400,
+                            "prompt": "private step prompt",
+                        },
+                        "response": "private step response",
+                    },
                     retry_at=None,
                     recovery_metadata=None,
                 ),
@@ -275,6 +282,17 @@ def test_run_trace_returns_authorized_safe_ordered_projection(tmp_path: Path) ->
     assert [item["event_type"] for item in payload["events"]] == [
         "run.dispatched", "step.failed", "run.failed",
     ]
+    assert payload["steps"] == [{
+        "id": "step-1",
+        "status": "failed",
+        "step_key": "brief",
+        "generation": 1,
+        "attempt_count": 1,
+        "error": {
+            "code": "invalid_request",
+            "provider_summary": {"http_status": 400},
+        },
+    }]
     assert payload["operations"][0]["operation"] == {
         "id": "operation-1",
         "operation_kind": "text_generation",
@@ -301,7 +319,8 @@ def test_run_trace_returns_authorized_safe_ordered_projection(tmp_path: Path) ->
     for forbidden in (
         "private prompt", "private source content", "raw provider response",
         "Bearer secret", "private-request-fingerprint", "private-idempotency-key",
-        "private-job-id", "private provider body",
+        "private-job-id", "private provider body", "private step prompt",
+        "private step response",
     ):
         assert forbidden not in response.text
 
