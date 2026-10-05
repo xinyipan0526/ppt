@@ -73,6 +73,32 @@ npm run dev
 Vite 开发服务代理 `/api` 到 `127.0.0.1:8000`。生产使用前执行 `npm run build`，
 并将 `web/dist` 内容同步到 `src/ppt_agent/static`；仓库已提交可直接打包的构建产物。
 
-源码开发时，Vite 页面改动会热更新；Python 后端改动需要重启后端（除非使用显式的
-reload 启动方式）。通过 `pip install .` 安装的正式版本不会读取仓库源码：拉取更新后
-必须重新构建/安装并重启 `ppt-agent serve`，浏览器刷新后才会使用新的后端与静态资源。
+`--reload` 仅用于源码开发。通过 `pip install .` 安装的正式版本不会读取仓库源码：
+拉取更新后必须重新构建/安装并重启 `ppt-agent serve`，浏览器刷新后才会使用新的后端
+与静态资源。
+## Audit logs and safe local inspection
+Each service start writes structured JSONL records below the configured
+workspace at `logs/ppt-agent.jsonl`. The file rotates at 10 MiB and retains
+three backups (`.1` through `.3`). Records contain bounded operational context;
+credentials, authorization headers, raw prompts, source contents, secret paths,
+and sensitive values nested inside structured fields are redacted as
+`[REDACTED]`. Never paste an API key or a raw request/response into a log field.
+
+The browser can show a bounded, project-authorized trace with
+`GET /api/v1/runs/{run_id}/trace`. It includes the Run status/error, steps,
+ordered event types, and safe provider summaries. The default limits are 100
+events and 50 operations; larger requested limits return HTTP 422. The trace
+does not expose input text, source contents, provider payloads, or secrets.
+
+If the HTTP service is unavailable, use SQLite in read-only mode to inspect
+safe identifiers and statuses. From the repository root, replace
+`<run-id>` and run:
+
+```powershell
+& '.\\.venv\\Scripts\\python.exe' -c "import sqlite3; db=sqlite3.connect('workspace/state.db'); db.execute('PRAGMA query_only=ON'); print(*db.execute(\"SELECT run_seq,event_type,occurred_at,step_id,operation_id,trace_id FROM workflow_events WHERE run_id=? ORDER BY run_seq LIMIT 100\", ('<run-id>',)), sep='\\n'); db.close()"
+```
+
+This fallback deliberately selects only trace metadata and never selects the
+`payload`, planning input text, provider request/response data, or secret
+tables. The API trace remains preferable because it applies authentication,
+project ownership, and the same result bounds.

@@ -75,3 +75,26 @@ Workspace 必须位于支持排他锁、原子替换、`fsync` 和可靠 SQLite 
 
 停止服务后备份整个 Workspace。启动时系统会自动迁移数据库、检查完整性、对账
 Artifact，并只恢复有明确安全证据的任务。`outcome_unknown` 永不自动重发。
+## Audit logs and Run traces
+The composition root writes structured, one-record-per-line JSON logs to
+`<workspace>/logs/ppt-agent.jsonl`. The file is rotated at 10 MiB and keeps
+three rotated files (`ppt-agent.jsonl.1` through `.3`). Rotation is bounded;
+it does not change the SQLite workflow source of truth. The logger records
+bounded lifecycle and provider context such as Run, Step, Operation, provider,
+status, error code, and trace ID when available.
+
+Before a record is written, redaction walks nested dictionaries and sequences.
+API keys, bearer/authorization values, raw prompts, source contents, and local
+secret paths are replaced with `[REDACTED]`; exception text is also filtered.
+Do not add request or response bodies to log `extra` fields. Treat the JSONL
+files as local operational data and include them in backups only when the
+workspace itself is protected.
+
+For a project-authorized, read-only view of one run, use
+`GET /api/v1/runs/{run_id}/trace`. It returns the safe Run snapshot, ordered
+events, workflow steps, and provider operation/attempt summaries. Defaults are
+100 events and 50 operations; `event_limit` and `operation_limit` may request
+smaller values but values above the configured caps (100 and 50 by default)
+are rejected with HTTP 422. The endpoint requires the same local authentication
+and Run ownership checks as the other Run APIs, and never returns raw prompts,
+source material, provider request/response bodies, or API keys.
