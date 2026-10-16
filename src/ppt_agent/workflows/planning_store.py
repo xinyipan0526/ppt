@@ -3,7 +3,7 @@
 from collections import deque
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Literal
+from typing import Literal, TypeAlias
 from uuid import uuid4
 
 from pydantic import Field, model_validator
@@ -40,20 +40,23 @@ from ppt_agent.storage.models import (
 )
 
 
-PlanningStage = Literal[
+V1PlanningStage = Literal[
     "build_brief",
     "build_outline",
     "build_design_system",
     "build_page_specs",
     "review_plan",
 ]
-PLANNING_STAGES: tuple[PlanningStage, ...] = (
+V2PlanningStage = Literal["build_plan", "review_plan"]
+PlanningStage: TypeAlias = V1PlanningStage | V2PlanningStage
+V1_PLANNING_STAGES: tuple[V1PlanningStage, ...] = (
     "build_brief",
     "build_outline",
     "build_design_system",
     "build_page_specs",
     "review_plan",
 )
+V2_PLANNING_STAGES: tuple[V2PlanningStage, ...] = ("build_plan", "review_plan")
 
 
 @dataclass(frozen=True, slots=True)
@@ -105,9 +108,11 @@ class PlanningStore:
         source_refs: tuple[str, ...],
         normalized_text: str,
         *,
+        workflow_version: int = 2,
         validate_source_refs: bool = False,
         source_material_refs: tuple[tuple[str, str], ...] = (),
     ) -> RunSnapshot:
+        self._stages_for_version(workflow_version)
         if not normalized_text.strip():
             raise ValueError("normalized planning text must not be empty")
         if len(source_refs) != len(set(source_refs)):
@@ -145,7 +150,7 @@ class PlanningStore:
                 id=run_id,
                 project_id=project_id,
                 workflow_name="deck_planning",
-                workflow_version=1,
+                workflow_version=workflow_version,
                 status=RunStatus.QUEUED,
             )
             session.add(run)
@@ -170,7 +175,10 @@ class PlanningStore:
                 session,
                 run_id=run_id,
                 event_type="run.queued",
-                payload={"status": RunStatus.QUEUED.value, "workflow": "deck_planning/v1"},
+                payload={
+                    "status": RunStatus.QUEUED.value,
+                    "workflow": f"deck_planning/v{workflow_version}",
+                },
             )
             return RunSnapshot(
                 id=run.id,
@@ -203,7 +211,8 @@ class PlanningStore:
             )
             if current is None:
                 raise LookupError(f"planning input not found: {run_id}")
-            for stage in PLANNING_STAGES:
+            stages = self._stages_for_version(run.workflow_version)
+            for stage in stages:
                 step = session.scalar(
                     select(WorkflowStepRecord)
                     .where(
@@ -224,7 +233,9 @@ class PlanningStore:
                     status=StepStatus.PENDING,
                     attempt_count=0,
                     idempotency_key=f"deck-planning:{run_id}:{stage}:1",
-                    input_refs=self._previous_output_refs(session, run_id, stage),
+                    input_refs=self._previous_output_refs(
+                        session, run_id, stage, stages
+                    ),
                 )
                 session.add(step)
                 session.flush()
@@ -487,8 +498,15 @@ class PlanningStore:
             "pages": 3,
             "auto": 1,
         }
-        affected = PLANNING_STAGES[start_by_scope[request.scope] :]
         with session_scope(self._sessions) as session:
+            run = session.get(WorkflowRunRecord, run_id)
+            if run is None:
+                raise LookupError(f"run not found: {run_id}")
+            stages = self._stages_for_version(run.workflow_version)
+            if run.workflow_version == 1:
+                affected = stages[start_by_scope[request.scope] :]
+            else:
+                affected = stages
             current = session.scalar(
                 select(PlanningInputRecord)
                 .where(PlanningInputRecord.run_id == run_id)
@@ -540,7 +558,9 @@ class PlanningStore:
                     idempotency_key=(
                         f"deck-planning:{run_id}:{stage}:{generation}"
                     ),
-                    input_refs=self._previous_output_refs(session, run_id, stage),
+                    input_refs=self._previous_output_refs(
+                        session, run_id, stage, stages
+                    ),
                 )
                 session.add(step)
             append_event_record(
@@ -581,8 +601,13 @@ class PlanningStore:
             )
 
     @staticmethod
-    def _previous_output_refs(session, run_id: str, stage: str) -> list[str]:
-        index = PLANNING_STAGES.index(stage)  # type: ignore[arg-type]
+    def _previous_output_refs(
+        session,
+        run_id: str,
+        stage: str,
+        stages: tuple[PlanningStage, ...],
+    ) -> list[str]:
+        index = stages.index(stage)  # type: ignore[arg-type]
         if index == 0:
             current = session.scalar(
                 select(PlanningInputRecord)
@@ -594,12 +619,20 @@ class PlanningStore:
             select(WorkflowStepRecord)
             .where(
                 WorkflowStepRecord.run_id == run_id,
-                WorkflowStepRecord.step_key == PLANNING_STAGES[index - 1],
+                WorkflowStepRecord.step_key == stages[index - 1],
                 WorkflowStepRecord.status == StepStatus.SUCCEEDED,
             )
             .order_by(WorkflowStepRecord.generation.desc())
         )
         return [] if previous is None else list(previous.output_refs or ())
+
+    @staticmethod
+    def _stages_for_version(version: int) -> tuple[PlanningStage, ...]:
+        if version == 1:
+            return V1_PLANNING_STAGES
+        if version == 2:
+            return V2_PLANNING_STAGES
+        raise ValueError(f"unsupported deck planning workflow version: {version}")
 
     @staticmethod
     def _planning_step(record: WorkflowStepRecord) -> PlanningStep:

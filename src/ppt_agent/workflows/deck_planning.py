@@ -102,6 +102,7 @@ class DeckPlanningWorkflow:
         project_id: str,
         normalized_text: str,
         source_refs: tuple[str, ...] = (),
+        workflow_version: int = 2,
         validate_source_refs: bool = False,
         source_material_refs: tuple[tuple[str, str], ...] = (),
     ):
@@ -109,11 +110,24 @@ class DeckPlanningWorkflow:
             project_id,
             source_refs,
             normalized_text,
+            workflow_version=workflow_version,
             validate_source_refs=validate_source_refs,
             source_material_refs=source_material_refs,
         )
 
     async def execute(self, run_id: str) -> None:
+        run = self.store.repository.get_run(run_id)
+        if run.workflow_version == 1:
+            await self._execute_v1(run_id)
+            return
+        if run.workflow_version == 2:
+            await self._execute_v2(run_id)
+            return
+        raise ValueError(
+            f"unsupported deck planning workflow version: {run.workflow_version}"
+        )
+
+    async def _execute_v1(self, run_id: str) -> None:
         run = self.store.repository.get_run(run_id)
         if run.status in {
             RunStatus.WAITING_FOR_USER,
@@ -186,6 +200,25 @@ class DeckPlanningWorkflow:
                         ),
                     )
                 return
+
+    async def _execute_v2(self, run_id: str) -> None:
+        run = self.store.repository.get_run(run_id)
+        if run.status in {
+            RunStatus.WAITING_FOR_USER,
+            RunStatus.WAITING_FOR_RETRY,
+            RunStatus.RECOVERY_REQUIRED,
+            RunStatus.CANCEL_REQUESTED,
+            RunStatus.SUCCEEDED,
+            RunStatus.FAILED,
+            RunStatus.CANCELLED,
+        }:
+            return
+        if run.status is RunStatus.QUEUED:
+            self.store.repository.transition_run(run_id, RunEvent.DISPATCHED)
+        step = self.store.next_step(run_id)
+        if step.stage != "build_plan":
+            raise RuntimeError(f"unexpected v2 planning stage: {step.stage}")
+        raise NotImplementedError("deck_planning/v2 build_plan is not implemented")
 
     async def _build_brief(self, run_id: str, step: PlanningStep) -> bool:
         current = self.store.current_input(run_id)
