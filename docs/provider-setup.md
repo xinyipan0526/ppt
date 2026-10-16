@@ -16,7 +16,7 @@
 若已有任务运行，新设置显示“待激活”，任务结束后切换；运行中的任务不会更换模型。
 
 API Key 不会返回浏览器，也不会进入 JSON、SQLite、日志或事件；提交成功后密码框立即
-清空。Key 保存于 `workspace/.secrets/providers/volcengine_ark.key`，非密钥配置保存于
+清空。Key 保存于 `workspace/.secrets/adapters/volcengine_ark.key`，非密钥配置保存于
 `workspace/config/provider-settings.json`。
 
 ## 支持的模型
@@ -50,14 +50,21 @@ Secret Manager 或容器可使用 `ARK_API_KEY_FILE`。不要把真实 Key 写�
 ## 调用与恢复边界
 
 所有可能计费的远端调用仍先持久化 Operation/Attempt，并原子预留预算。明确未计费且
-可重试的失败才会自动重试；远端结果不确定时进入 `outcome_unknown`，不会自动重发。
+可重试的失败才会自动重试。错误码 `unknown_remote_outcome` 表示远端结果不确定，对应的
+Attempt 会进入 `outcome_unknown` 状态，不会自动重发。
+
+连接、写入和读取超时会记录阶段、配置阈值、实际耗时以及是否收到可验证响应。尤其是读取
+超时，只能说明客户端在阈值内没有获得完整响应，不能证明方舟端没有执行；因此该情况会
+保留预算并进入人工核对路径，而不是静默失败或自动重试。安全的 Request ID 与方舟错误摘要
+会进入本地 JSONL 日志，API Key、Prompt、原始请求/响应体不会写入日志或前端投影。
 
 常见错误：
 
 - `model_runtime_invalid`：模型 ID 不在目录内，或模型类别选错。
 - `authentication_error`：API Key 无效或无对应方舟资源权限。
 - `model_unavailable`：所选模型未在当前账号/区域开通。
-- `outcome_unknown`：先到方舟控制台核对请求，再决定是否显式重试。
+- `unknown_remote_outcome`：先到方舟控制台核对请求，再决定是否显式重试。
 
-真实付费 Smoke Test 默认关闭。本次 UI 的“测试并启用”只检查凭据与模型可访问性，
-不会生成 PPT 或图片；正式发布前仍应由账号持有人明确授权执行真实调用验收。
+真实付费 Smoke Test 默认关闭。UI 的“测试并启用”只检查凭据与模型可访问性，不会生成
+PPT 或图片；正式发布前仍应由账号持有人明确授权执行真实调用验收。开发环境和测试命令见
+[开发指南](development.md)。

@@ -6,7 +6,7 @@ import re
 from typing import Any
 from uuid import uuid4
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
 from ppt_agent.domain.state_machine import (
@@ -70,6 +70,7 @@ class StepSnapshot:
     step_key: str
     generation: int
     status: StepStatus
+    error: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -124,6 +125,28 @@ class WorkflowRepository:
         with session_scope(self._sessions) as session:
             record = self._require_run(session, run_id)
             return self._run_snapshot(record)
+
+    def request_cancellation(self, run_id: str) -> tuple[RunSnapshot, bool]:
+        """Atomically persist cancellation intent, or return its durable outcome."""
+
+        with session_scope(self._sessions) as session:
+            session.execute(text("BEGIN IMMEDIATE"))
+            record = self._require_run(session, run_id)
+            if record.status in {
+                RunStatus.CANCEL_REQUESTED,
+                RunStatus.CANCELLED,
+                RunStatus.FAILED,
+                RunStatus.SUCCEEDED,
+            }:
+                return self._run_snapshot(record), False
+            record.status = transition_run(record.status, RunEvent.CANCEL_REQUESTED)
+            self._append_event(
+                session,
+                run_id=run_id,
+                event_type=f"run.{RunEvent.CANCEL_REQUESTED.value}",
+                payload={"status": record.status.value},
+            )
+            return self._run_snapshot(record), True
 
     def complete_cancellation(self, run_id: str) -> RunSnapshot:
         with session_scope(self._sessions) as session:
@@ -433,22 +456,48 @@ class WorkflowRepository:
             ).all()
             return [self._event_snapshot(record) for record in records]
 
-    def mark_run_recovery_required(self, run_id: str, *, reason: str) -> RunSnapshot:
+    def mark_run_recovery_required(
+        self,
+        run_id: str,
+        *,
+        reason: str,
+        error: object | None = None,
+        step_id: str | None = None,
+        operation_id: str | None = None,
+    ) -> RunSnapshot:
         """Persist an interrupted local execution without making it retry-safe."""
 
         with session_scope(self._sessions) as session:
             run = self._require_run(session, run_id)
+            safe_error = (
+                None if error is None else safe_provider_failure_error(error)
+            )
+            changed = False
             if run.status is RunStatus.RUNNING:
                 run.status = transition_run(run.status, RunEvent.PROCESS_RESTARTED)
                 run.recovery_metadata = {"reason": reason}
-            for step in session.scalars(
+                changed = True
+            if safe_error is not None and run.error != safe_error:
+                run.error = safe_error
+                changed = True
+            steps = list(session.scalars(
                 select(WorkflowStepRecord).where(
                     WorkflowStepRecord.run_id == run_id,
-                    WorkflowStepRecord.status == StepStatus.RUNNING,
+                    *(
+                        (WorkflowStepRecord.id == step_id,)
+                        if step_id is not None
+                        else (WorkflowStepRecord.status == StepStatus.RUNNING,)
+                    ),
                 )
-            ):
-                step.status = transition_step(step.status, StepEvent.PROCESS_RESTARTED)
-                step.recovery_metadata = {"reason": reason}
+            ))
+            for step in steps:
+                if step.status is StepStatus.RUNNING:
+                    step.status = transition_step(step.status, StepEvent.PROCESS_RESTARTED)
+                    step.recovery_metadata = {"reason": reason}
+                    changed = True
+                if safe_error is not None and step.error != safe_error:
+                    step.error = safe_error
+                    changed = True
             for page in session.scalars(
                 select(PageRecord).where(
                     PageRecord.run_id == run_id,
@@ -457,12 +506,26 @@ class WorkflowRepository:
             ):
                 page.status = transition_page(page.status, PageEvent.PROCESS_RESTARTED)
                 page.recovery_metadata = {"reason": reason}
-            self._append_event(
-                session,
-                run_id=run_id,
-                event_type="run.recovery_required",
-                payload={"status": run.status.value, "reason": reason},
-            )
+                changed = True
+            if changed:
+                payload: dict[str, Any] = {
+                    "status": run.status.value,
+                    "reason": reason,
+                }
+                if step_id is not None:
+                    payload["step_id"] = step_id
+                if operation_id is not None:
+                    payload["operation_id"] = operation_id
+                if safe_error is not None:
+                    payload["error"] = safe_error
+                self._append_event(
+                    session,
+                    run_id=run_id,
+                    step_id=step_id,
+                    operation_id=operation_id,
+                    event_type="run.recovery_required",
+                    payload=payload,
+                )
             return self._run_snapshot(run)
 
     def mark_recovery_retry_safe(self, run_id: str, *, evidence: str) -> RunSnapshot:
@@ -528,12 +591,16 @@ class WorkflowRepository:
         run_id: str,
         event_type: str,
         payload: dict[str, Any],
+        step_id: str | None = None,
+        operation_id: str | None = None,
     ) -> WorkflowEventRecord:
         return append_event_record(
             session,
             run_id=run_id,
             event_type=event_type,
             payload=payload,
+            step_id=step_id,
+            operation_id=operation_id,
         )
 
     @staticmethod
@@ -565,6 +632,7 @@ class WorkflowRepository:
             step_key=record.step_key,
             generation=record.generation,
             status=record.status,
+            error=record.error,
         )
 
     @staticmethod

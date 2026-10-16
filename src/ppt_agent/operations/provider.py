@@ -181,21 +181,50 @@ _SAFE_PROVIDER_EXCEPTION_TYPES = frozenset(
 )
 
 
-def safe_provider_failure_summary(summary: dict[str, Any] | None) -> dict[str, int | str]:
+def safe_provider_failure_summary(
+    summary: dict[str, Any] | None,
+) -> dict[str, int | float | str | bool]:
     """Allowlist bounded Provider failure metadata before durable persistence."""
 
     if not isinstance(summary, dict):
         return {}
-    safe: dict[str, int | str] = {}
+    safe: dict[str, int | float | str | bool] = {}
     status = summary.get("http_status")
     if isinstance(status, int) and not isinstance(status, bool) and 100 <= status <= 599:
         safe["http_status"] = status
     error_type = summary.get("provider_error_type")
-    if isinstance(error_type, str) and error_type in _SAFE_PROVIDER_ERROR_CODES:
+    if isinstance(error_type, str) and (
+        error_type in _SAFE_PROVIDER_ERROR_CODES
+        or error_type in _SAFE_PROVIDER_EXCEPTION_TYPES
+    ):
         safe["provider_error_type"] = error_type
     exception_type = summary.get("exception_type")
     if isinstance(exception_type, str) and exception_type in _SAFE_PROVIDER_EXCEPTION_TYPES:
         safe["exception_type"] = exception_type
+    phase = summary.get("request_phase")
+    if phase in {"connect", "write", "read", "parse", "validate"}:
+        safe["request_phase"] = phase
+    for key in ("timeout_seconds", "elapsed_seconds"):
+        value = summary.get(key)
+        if (
+            isinstance(value, (int, float))
+            and not isinstance(value, bool)
+            and 0 <= value <= 86_400
+        ):
+            safe[key] = value
+    response_received = summary.get("provider_response_received")
+    if isinstance(response_received, bool):
+        safe["provider_response_received"] = response_received
+    request_id = summary.get("provider_request_id")
+    if (
+        isinstance(request_id, str)
+        and 1 <= len(request_id) <= 128
+        and all(character.isalnum() or character in "._:-" for character in request_id)
+    ):
+        safe["provider_request_id"] = request_id
+    message = summary.get("provider_error_message")
+    if isinstance(message, str) and 1 <= len(message) <= 512:
+        safe["provider_error_message"] = message
     return safe
 
 
@@ -355,13 +384,23 @@ class ProviderOperationService:
             self._recompute_operation(session, attempt.operation_id)
             return self._attempt_snapshot(attempt)
 
-    def mark_outcome_unknown(self, attempt_id: str) -> AttemptSnapshot:
+    def mark_outcome_unknown(
+        self,
+        attempt_id: str,
+        *,
+        error_code: str = "unknown_remote_outcome",
+        response_summary: dict[str, Any] | None = None,
+    ) -> AttemptSnapshot:
         with session_scope(self._sessions) as session:
             self._ledger.begin_write_transaction(session)
             attempt = self._require_attempt(session, attempt_id)
             attempt.status = transition_attempt(
                 attempt.status, AttemptEvent.OUTCOME_CANNOT_BE_PROVEN
             )
+            attempt.error_code = str(
+                safe_provider_failure_error({"code": error_code})["code"]
+            )
+            attempt.response_summary = safe_provider_failure_summary(response_summary)
             self._ledger.hold_unknown_in_transaction(session, attempt.reservation_id)
             self._recompute_operation(session, attempt.operation_id)
             return self._attempt_snapshot(attempt)

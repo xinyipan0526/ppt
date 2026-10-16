@@ -104,6 +104,24 @@ def test_file_logger_rejects_unbounded_rotation(tmp_path: Path) -> None:
         configure_file_logging(tmp_path, max_bytes=10_000, backup_count=0)
 
 
+def test_file_logger_reuses_workspace_handler_without_duplicate_records(tmp_path: Path) -> None:
+    first = configure_file_logging(tmp_path, max_bytes=10_000, backup_count=1)
+    second = configure_file_logging(tmp_path, max_bytes=20_000, backup_count=2)
+    logger = logging.getLogger("ppt_agent.logging.reconfigure")
+    try:
+        assert second is first
+        logger.info("one terminal record")
+        second.flush()
+        lines = (tmp_path / "logs" / "ppt-agent.jsonl").read_text().splitlines()
+    finally:
+        shutdown_file_logging(second)
+
+    assert len(lines) == 1
+    assert json.loads(lines[0])["message"] == "one terminal record"
+    assert second.maxBytes == 20_000
+    assert second.backupCount == 2
+
+
 def test_file_logger_redacts_standalone_secret_paths_and_other_auth_schemes(tmp_path: Path) -> None:
     handler = configure_file_logging(tmp_path, max_bytes=10_000, backup_count=1)
     try:
@@ -144,3 +162,61 @@ def test_file_logger_redacts_rfc_token_auth_schemes_in_messages_and_exceptions(t
 
     assert "message-secret" not in text
     assert "exception-secret" not in text
+
+
+def test_file_logger_reenables_existing_ppt_agent_children(tmp_path: Path) -> None:
+    logger = logging.getLogger("ppt_agent.workflows.deck_planning")
+    previous_disabled = logger.disabled
+    logger.disabled = True
+
+    handler = configure_file_logging(tmp_path, max_bytes=10_000, backup_count=1)
+    try:
+        assert logger.disabled is False
+        logger.error("provider.failed", extra={"run_id": "run-1"})
+        handler.flush()
+        record = json.loads((tmp_path / "logs" / "ppt-agent.jsonl").read_text())
+        assert record["message"] == "provider.failed"
+        assert record["run_id"] == "run-1"
+    finally:
+        shutdown_file_logging(handler)
+        logger.disabled = previous_disabled
+
+
+def test_file_logger_keeps_exception_tail_and_cause_without_messages_or_paths(
+    tmp_path: Path,
+) -> None:
+    handler = configure_file_logging(tmp_path, max_bytes=10_000, backup_count=1)
+    logger = logging.getLogger("test.exception.chain")
+    logger.setLevel(logging.ERROR)
+
+    def endpoint_handler() -> None:
+        try:
+            raise ValueError(
+                "inner api_key=inner-secret C:/private/workspace/request.json"
+            )
+        except ValueError as exc:
+            raise RuntimeError(
+                "outer prompt=private-payload C:/private/workspace/response.json"
+            ) from exc
+
+    try:
+        try:
+            endpoint_handler()
+        except RuntimeError:
+            logger.exception("request failed")
+        handler.flush()
+        text = (tmp_path / "logs" / "ppt-agent.jsonl").read_text(encoding="utf-8")
+        record = json.loads(text)
+    finally:
+        logger.setLevel(logging.NOTSET)
+        shutdown_file_logging(handler)
+
+    exception = record["exception"]
+    assert "endpoint_handler" in exception
+    assert "ValueError" in exception
+    assert "RuntimeError" in exception
+    assert "caused by" in exception.casefold()
+    assert "inner-secret" not in text
+    assert "private-payload" not in text
+    assert "C:/private/workspace" not in text
+    assert len(exception) <= 2_048

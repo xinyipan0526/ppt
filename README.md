@@ -1,24 +1,20 @@
 # PPT Agent
 
-> 当前版本已经交付完整的同源 React 产品工作台与生产级后端。安装后运行
-> `ppt-agent serve`，浏览器会自动打开 `http://localhost:8000/`；无需 Node.js。
-> 无 API Key 时使用确定性模式完整试跑，正式使用可在“模型设置”中安全配置
-> 一个火山方舟 API Key、一个多模态模型和一个图片模型。密钥不会进入浏览器存储、
-> 数据库、事件或 API 响应；价格、端点与结果域名均有目录默认值，无需用户填写。
+一个面向个人用户、在本地运行的开源 PPT 生成 Agent。安装后运行 `ppt-agent serve`，
+即可在浏览器中完成资料上传、规划、生成、修改和导出；不配置 API Key 也能使用确定性模式
+体验完整流程。
 
-使用入口：[快速开始](docs/quickstart.md) · [配置说明](docs/configuration.md) ·
-[云 Provider 设置](docs/provider-setup.md) · [产品 UI 教程](docs/ui-guide.md) ·
-[HTTP API](docs/api-tutorial.md)
+第一次使用请直接阅读 [5 分钟快速开始](docs/quickstart.md)。
 
-一个面向个人用户、可在本地运行的开源 PPT 生成 Agent。
+文档导航：[快速开始](docs/quickstart.md) · [开发指南](docs/development.md) ·
+[配置与运维](docs/configuration.md) · [火山方舟模型配置](docs/provider-setup.md) ·
+[界面使用指南](docs/ui-guide.md) · [HTTP API](docs/api-tutorial.md)
 
 用户可以输入文本、Markdown、参考图片或 PDF。系统通过可恢复的 Agent Workflow 完成需求澄清、整套演示文稿规划、视觉风格设计、生成式视觉资产、确定性文字排版、页面合成、质量检查和自然语言局部修改，最终导出逐页图片、ZIP、PDF，以及每页铺满图片的 PPTX。
 
 本项目不是一次性的能力演示。设计目标是构建一个关注生成效果、成本、稳定性、可观测性和可恢复性的生产级本地应用。
 
-> 当前产品已完整支持可恢复规划、素材解析、火山方舟 Doubao Seed/Seedream 云调用、确定性排版、视觉/OCR 质检、自然语言单页编辑，以及 PNG/JPG/ZIP/PDF/图片型 PPTX 导出；无 Key 的确定性模式可运行完整闭环。React 工作台与后端由 FastAPI 同源交付。进度检查点以 [AGENTS.md](AGENTS.md) 为准。
-
-快速上手：[本机与 Docker 启动](docs/quickstart.md) · [配置参考](docs/configuration.md) · [云 Provider](docs/provider-setup.md) · [HTTP API 教程](docs/api-tutorial.md)
+> 当前产品已完整支持可恢复规划、素材解析、火山方舟 Doubao Seed/Seedream 云调用、确定性排版、视觉/OCR 质检、自然语言单页编辑，以及 PNG/JPG/ZIP/PDF/图片型 PPTX 导出。React 工作台与后端由 FastAPI 同源交付。进度检查点以 [AGENTS.md](AGENTS.md) 为准。
 
 ## 1. 产品定位
 
@@ -53,6 +49,7 @@
 ## 2. 产品原则
 
 1. **结构化规划先于生成**：先确认 Brief、设计系统、逐页方案和文字布局，再触发高成本图片生成。
+   信息充分时，首次规划通过一次结构化模型响应生成整套规划；澄清和用户主动修订才会增加后续调用。
 2. **Workflow 控制流程，Agent 处理不确定性**：确定性状态机负责顺序、预算、审批和恢复；ReAct Agent 只在需要探索和判断的节点运行。
 3. **结构化状态是事实源**：聊天用于交互，不能代替项目状态、页面规格或用户确认记录。
 4. **默认成本可控**：任何自动重试、修复和升级模型都有上限。
@@ -484,7 +481,7 @@ Project
 左侧：页面缩略列表，可排序、增删
 中间：当前页 PageSpec 编辑器
 右侧：DesignSystem、素材引用、Agent 建议
-底部：Agent 轨迹抽屉
+底部：按需打开的运行详情（默认不请求 Agent 轨迹）
 ```
 
 用户在这里确认大纲、逐页内容、布局说明、视觉描述和复合样式预览。任何修改都应展示受影响范围。
@@ -641,7 +638,7 @@ ppt-agent/
 首版同时支持两种方式，并共用配置模型、数据目录和数据库迁移：
 
 1. 普通用户使用原生 Python 安装或 Docker Compose 启动；正式包同源提供 React 静态资源。
-2. 开发者分别启动 Python API 和 Vite 开发服务器；Vite 前端支持热更新，Python 后端改动需要重启或显式 reload。TaskSupervisor 随 API lifespan 启动。
+2. 开发者使用 editable 安装，分别运行 `ppt-agent serve --reload --no-open` 和 Vite 开发服务器；前端使用 HMR，Python 改动会重启完整后端运行时。TaskSupervisor 随 API lifespan 启动。
 
 `pip install .`/wheel 安装会把 Python 代码与 Web 构建产物复制到环境中，仓库修改不会
 实时进入已安装程序；更新后必须重新构建/安装并重启服务。CI 同时验证原生开发启动

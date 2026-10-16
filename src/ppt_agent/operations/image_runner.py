@@ -5,20 +5,30 @@ from __future__ import annotations
 import base64
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
+import logging
 from typing import TYPE_CHECKING
 
 from ppt_agent.ledger.costs import UsageInput
-from ppt_agent.operations.provider import PrepareAttempt, ProviderOperationService
+from ppt_agent.operations.provider import (
+    PrepareAttempt,
+    ProviderOperationService,
+    safe_provider_failure_summary,
+)
 from ppt_agent.providers.image import (
     ImageGenerationProvider,
     ImageGenerationRequest,
     ImageProviderCallError,
     ImageUsage,
+    sanitize_provider_diagnostic_identifier,
+    sanitize_provider_error_message,
 )
 from ppt_agent.providers.result_download import ResultDownloader
 
 if TYPE_CHECKING:
     from ppt_agent.providers.catalog import ImagePricingSchedule
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -138,19 +148,77 @@ class ImageOperationRunner:
             return ImageOperationResult(stored.attempt_id, stored.operation_id, content, stored.media_type, width, height, usage)
         prepared = self._operations.prepare_attempt(replace(operation, request_fingerprint=fingerprint))
         self._operations.commit_submission_intent(prepared.id)
+        logger.info(
+            "provider.submitted",
+            extra=self._log_context(
+                operation, status="submitted", event_type="provider.submitted"
+            ),
+        )
         try:
             result = await self._provider.generate(request)
         except ImageProviderCallError as exc:
+            summary = safe_provider_failure_summary(exc.safe_summary)
+            log_summary: dict[str, int | str] = dict(summary)
+            provider_message = sanitize_provider_error_message(
+                exc.safe_summary.get("provider_error_message"),
+                sensitive_values=(request.prompt, request.edit_instruction),
+            )
+            if provider_message is not None:
+                log_summary["provider_error_message"] = provider_message
+            for key in ("provider_error_code", "provider_request_id"):
+                identifier = sanitize_provider_diagnostic_identifier(
+                    exc.safe_summary.get(key)
+                )
+                if identifier is not None:
+                    log_summary[key] = identifier
             if exc.usage is not None and exc.billing_known:
-                self._operations.record_charged_failure(prepared.id, self._usage(prepared.id, operation, pricing, exc.usage, request.width, request.height), exc.code, exc.safe_summary)
+                self._operations.record_charged_failure(
+                    prepared.id,
+                    self._usage(
+                        prepared.id,
+                        operation,
+                        pricing,
+                        exc.usage,
+                        request.width,
+                        request.height,
+                    ),
+                    exc.code,
+                    summary,
+                )
             elif exc.confirmed_uncharged:
                 self._operations.record_known_failure(
                     prepared.id, error_code=exc.code, confirmed_uncharged=True,
+                    response_summary=summary,
                     retry_at=(datetime.now(UTC) + timedelta(seconds=30)) if exc.retryable else None,
                 )
             else:
                 self._operations.begin_recovery(prepared.id)
-                self._operations.mark_outcome_unknown(prepared.id)
+                self._operations.mark_outcome_unknown(
+                    prepared.id,
+                    error_code=exc.code,
+                    response_summary=summary,
+                )
+                logger.warning(
+                    "provider.outcome_unknown",
+                    extra=self._log_context(
+                        operation,
+                        status="outcome_unknown",
+                        event_type="provider.outcome_unknown",
+                        error_code=exc.code,
+                        **log_summary,
+                    ),
+                )
+                raise
+            logger.error(
+                "provider.failed",
+                extra=self._log_context(
+                    operation,
+                    status="failed",
+                    event_type="provider.failed",
+                    error_code=exc.code,
+                    **log_summary,
+                ),
+            )
             raise
         content = result.content
         media_type, width, height = result.media_type, result.width, result.height
@@ -203,6 +271,21 @@ class ImageOperationRunner:
             },
         )
         return ImageOperationResult(prepared.id, prepared.operation_id, content, media_type, width, height, result.usage)
+
+    @staticmethod
+    def _log_context(
+        operation: PrepareAttempt, **context: int | str | None
+    ) -> dict[str, int | str]:
+        values: dict[str, int | str | None] = {
+            "run_id": operation.run_id,
+            "step_id": operation.step_id,
+            "page_id": operation.page_id,
+            "operation_id": operation.operation_id,
+            "provider": operation.provider,
+            "model": operation.model,
+            **context,
+        }
+        return {key: value for key, value in values.items() if value is not None}
 
     def _usage(self, attempt_id: str, operation: PrepareAttempt, pricing: ImagePricing, usage: ImageUsage, width: int, height: int) -> UsageInput:
         amount = pricing.quote(

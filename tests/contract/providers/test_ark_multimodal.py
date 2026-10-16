@@ -74,6 +74,7 @@ def test_complete_uses_responses_strict_schema_and_exact_model_id() -> None:
     assert captured["url"] == "https://ark.cn-beijing.volces.com/api/v3/responses"
     assert captured["authorization"] == "Bearer secret"
     assert body["model"] == MODEL_ID
+    assert "user" not in body
     assert body["text"]["format"] == {
         "type": "json_schema",
         "name": "brief_v1",
@@ -200,7 +201,47 @@ def test_http_400_failure_keeps_only_safe_normalized_metadata() -> None:
     assert raised.value.safe_summary == {
         "http_status": 400,
         "provider_error_type": "invalid_request",
+        "elapsed_seconds": pytest.approx(raised.value.safe_summary["elapsed_seconds"]),
+        "provider_response_received": True,
     }
+
+
+def test_http_error_keeps_safe_provider_message_and_response_request_id() -> None:
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            400,
+            headers={"x-request-id": "req-123"},
+            json={"error": {"message": "The selected model identifier is invalid."}},
+        )
+
+    async def scenario():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            return await ArkMultimodalAdapter("secret", client=client).complete(
+                _text_request()
+            )
+
+    with pytest.raises(ProviderCallError) as raised:
+        asyncio.run(scenario())
+
+    assert raised.value.safe_summary["provider_request_id"] == "req-123"
+    assert (
+        raised.value.safe_summary["provider_error_message"]
+        == "The selected model identifier is invalid."
+    )
+
+
+def test_provider_call_error_allows_standard_traceback_assignment() -> None:
+    error = ProviderCallError(
+        "invalid_request",
+        False,
+        True,
+        True,
+        None,
+        {"http_status": 400},
+    )
+
+    error.__traceback__ = None
+    assert str(error) == "invalid_request"
 
 
 def test_network_failure_is_unknown_and_not_automatically_retryable() -> None:
@@ -223,6 +264,59 @@ def test_network_failure_is_unknown_and_not_automatically_retryable() -> None:
     assert raised.value.code == "unknown_remote_outcome"
     assert raised.value.retryable is False
     assert raised.value.billing_known is False
+
+
+@pytest.mark.parametrize(
+    ("error_type", "phase"),
+    [
+        (httpx.ConnectTimeout, "connect"),
+        (httpx.PoolTimeout, "connect"),
+        (httpx.WriteTimeout, "write"),
+        (httpx.ReadTimeout, "read"),
+    ],
+)
+def test_timeout_failure_records_bounded_request_phase(
+    error_type: type[httpx.TimeoutException], phase: str
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise error_type("timed out", request=request)
+
+    async def scenario():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            return await ArkMultimodalAdapter(
+                "secret", client=client, timeout_seconds=90
+            ).complete(_text_request())
+
+    with pytest.raises(ProviderCallError) as raised:
+        asyncio.run(scenario())
+
+    assert raised.value.code == "unknown_remote_outcome"
+    assert raised.value.safe_summary["provider_error_type"] == error_type.__name__
+    assert raised.value.safe_summary["request_phase"] == phase
+    assert raised.value.safe_summary["timeout_seconds"] == 90
+    assert raised.value.safe_summary["elapsed_seconds"] >= 0
+    assert raised.value.safe_summary["provider_response_received"] is False
+
+
+def test_read_timeout_does_not_invent_provider_response_fields() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("timed out", request=request)
+
+    async def scenario():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            return await ArkMultimodalAdapter(
+                "secret", client=client, timeout_seconds=90
+            ).complete(_text_request())
+
+    with pytest.raises(ProviderCallError) as raised:
+        asyncio.run(scenario())
+
+    summary = raised.value.safe_summary
+    assert summary["request_phase"] == "read"
+    assert summary["provider_response_received"] is False
+    assert "http_status" not in summary
+    assert "provider_error_message" not in summary
+    assert "provider_request_id" not in summary
 
 
 def test_malformed_success_with_usage_is_a_known_charged_failure() -> None:

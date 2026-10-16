@@ -15,10 +15,12 @@ from ppt_agent.domain.contracts import (
     ContractModel,
     DeckOutline,
     DesignSystem,
+    InitialPlanDecision,
     PageSpec,
     PageSpecPatch,
     PageSpecs,
     PlanningBundle,
+    PlanningDraft,
     PresentationBrief,
     SchemaEnvelope,
 )
@@ -169,8 +171,18 @@ class DeckPlanningWorkflow:
                     exc.code == "unknown_remote_outcome"
                     or (not exc.billing_known and not exc.confirmed_uncharged)
                 ):
+                    error = {
+                        "code": "unknown_remote_outcome",
+                        "provider_summary": safe_provider_failure_summary(
+                            exc.safe_summary
+                        ),
+                    }
                     self.store.repository.mark_run_recovery_required(
-                        run_id, reason=exc.code
+                        run_id,
+                        reason=exc.code,
+                        error=error,
+                        step_id=step.step_id,
+                        operation_id=self._operation_id(run_id, step),
                     )
                 else:
                     error = {
@@ -215,10 +227,257 @@ class DeckPlanningWorkflow:
             return
         if run.status is RunStatus.QUEUED:
             self.store.repository.transition_run(run_id, RunEvent.DISPATCHED)
-        step = self.store.next_step(run_id)
-        if step.stage != "build_plan":
-            raise RuntimeError(f"unexpected v2 planning stage: {step.stage}")
-        raise NotImplementedError("deck_planning/v2 build_plan is not implemented")
+        while self.store.repository.get_run(run_id).status is RunStatus.RUNNING:
+            step = self.store.next_step(run_id)
+            self.store.repository.transition_step(step.step_id, StepEvent.STARTED)
+            if self._recover_committed_step(run_id, step):
+                self._log_terminal_if_reached(run_id, step)
+                continue
+            try:
+                if step.stage == "build_plan":
+                    if not await self._build_plan(run_id, step):
+                        return
+                elif step.stage == "review_plan":
+                    if not self._review(run_id, step):
+                        self._log_terminal_if_reached(run_id, step)
+                        return
+                else:
+                    raise RuntimeError(f"unexpected v2 planning stage: {step.stage}")
+            except ProviderCallError as exc:
+                if exc.retryable and exc.confirmed_uncharged:
+                    raise
+                if (
+                    exc.code == "unknown_remote_outcome"
+                    or (not exc.billing_known and not exc.confirmed_uncharged)
+                ):
+                    error = {
+                        "code": "unknown_remote_outcome",
+                        "provider_summary": safe_provider_failure_summary(
+                            exc.safe_summary
+                        ),
+                    }
+                    self.store.repository.mark_run_recovery_required(
+                        run_id,
+                        reason=exc.code,
+                        error=error,
+                        step_id=step.step_id,
+                        operation_id=self._operation_id(run_id, step),
+                    )
+                else:
+                    error = {
+                        "code": exc.code,
+                        "provider_summary": safe_provider_failure_summary(
+                            exc.safe_summary
+                        ),
+                    }
+                    self.store.repository.transition_step(
+                        step.step_id, StepEvent.FAILED, payload={"error": error}
+                    )
+                    self.store.repository.transition_run(
+                        run_id,
+                        RunEvent.UNRECOVERABLE_FAILURE,
+                        payload={"error": error},
+                    )
+                return
+
+    async def _build_plan(self, run_id: str, step: PlanningStep) -> bool:
+        current = self.store.current_input(run_id)
+        resumed = self.store.step_resume_payload(step.step_id)
+        if resumed:
+            current = self.store.record_clarification(run_id, resumed)
+        if current.revision_scope == "pages" and current.page_indexes:
+            await self._revise_v2_pages(run_id, step, current)
+            return True
+        content: dict[str, Any] = {
+            "normalized_text": current.normalized_text,
+            "source_refs": current.source_refs,
+        }
+        if current.clarification_answers:
+            content["clarification_answers"] = current.clarification_answers
+        self._add_revision_context(content, current)
+        if current.feedback:
+            prior_refs = self.store.stage_output_refs(run_id, "build_plan")
+            if len(prior_refs) < 5:
+                raise RuntimeError("full revision requires a complete prior plan")
+            content["current_plan"] = {
+                "brief": self._read_payload(prior_refs[0]),
+                "outline": self._read_payload(prior_refs[1]),
+                "design_system": self._read_payload(prior_refs[2]),
+                "pages": [self._read_payload(item) for item in prior_refs[4:]],
+            }
+            plan = cast(
+                PlanningDraft,
+                await self._call(
+                    run_id,
+                    step,
+                    prompt_identity="plan-revision",
+                    output_type=PlanningDraft,
+                    content=content,
+                ),
+            )
+        else:
+            decision = cast(
+                InitialPlanDecision,
+                await self._call(
+                    run_id,
+                    step,
+                    prompt_identity="initial-plan",
+                    output_type=InitialPlanDecision,
+                    content=content,
+                ),
+            )
+            if decision.kind == "clarification_required":
+                self._clarification.create(
+                    repository=self.store.repository,
+                    run_id=run_id,
+                    step_id=step.step_id,
+                    questions=decision.questions,
+                    reason=decision.reason or "More information is required.",
+                    context=ClarificationContext(
+                        input_refs=current.source_refs,
+                        prompt_version="initial-plan-v1",
+                        output_schema_name="initial_plan_decision",
+                        output_schema_version=1,
+                        step_generation=step.generation,
+                    ),
+                )
+                return False
+            assert decision.plan is not None
+            plan = decision.plan
+        operation_id = self._operation_id(run_id, step)
+        brief_id = self._write_artifact(
+            run_id,
+            "planning/brief",
+            "planning.brief",
+            "presentation_brief",
+            plan.brief,
+            current.source_refs,
+            operation_id=operation_id,
+        )
+        outline_id = self._write_artifact(
+            run_id,
+            "planning/outline",
+            "planning.outline",
+            "deck_outline",
+            plan.outline,
+            (brief_id,),
+            operation_id=operation_id,
+        )
+        design_id = self._write_artifact(
+            run_id,
+            "planning/design-system",
+            "planning.design_system",
+            "design_system",
+            plan.design_system,
+            (brief_id, outline_id),
+            operation_id=operation_id,
+        )
+        aggregate_id = self._write_artifact(
+            run_id,
+            "planning/page-specs-source",
+            "planning.page_specs",
+            "page_specs",
+            plan.page_specs,
+            (brief_id, outline_id, design_id),
+            operation_id=operation_id,
+        )
+        page_ids = tuple(
+            self._write_artifact(
+                run_id,
+                f"planning/pages/{page.page_index}",
+                "planning.page_spec",
+                "page_spec",
+                page,
+                (aggregate_id,),
+                operation_id=operation_id,
+            )
+            for page in plan.page_specs.pages
+        )
+        self.store.complete_plan(
+            step.step_id,
+            brief_id=brief_id,
+            outline_id=outline_id,
+            design_id=design_id,
+            page_specs_id=aggregate_id,
+            page_ids=page_ids,
+        )
+        return True
+
+    async def _revise_v2_pages(
+        self, run_id: str, step: PlanningStep, current
+    ) -> None:
+        prior_refs = self.store.stage_output_refs(run_id, "build_plan")
+        if len(prior_refs) < 5:
+            raise RuntimeError("targeted revision requires a complete prior plan")
+        brief_id, outline_id, design_id = prior_refs[:3]
+        prior_page_ids = list(prior_refs[4:])
+        outline = DeckOutline.model_validate(self._read_payload(outline_id))
+        content: dict[str, Any] = {
+            "brief": self._read_payload(brief_id),
+            "outline": outline.model_dump(mode="json"),
+            "design_system": self._read_payload(design_id),
+            "current_page_specs": [
+                self._read_payload(artifact_id) for artifact_id in prior_page_ids
+            ],
+        }
+        self._add_revision_context(content, current)
+
+        def validate_patch(value: ContractModel) -> None:
+            patch = cast(PageSpecPatch, value)
+            if tuple(page.page_index for page in patch.pages) != current.page_indexes:
+                raise ValueError("page patch must contain exactly the selected pages")
+            for page in patch.pages:
+                if page.objective != outline.pages[page.page_index - 1].objective:
+                    raise ValueError("patched page objective must match outline")
+
+        patch = cast(
+            PageSpecPatch,
+            await self._call(
+                run_id,
+                step,
+                prompt_identity="page-specs",
+                output_type=PageSpecPatch,
+                content=content,
+                validate_output=validate_patch,
+            ),
+        )
+        operation_id = self._operation_id(run_id, step)
+        patch_id = self._write_artifact(
+            run_id,
+            "planning/page-specs-patch",
+            "planning.page_specs_patch",
+            "page_spec_patch",
+            patch,
+            (
+                brief_id,
+                outline_id,
+                design_id,
+                *(
+                    artifact_id
+                    for index, artifact_id in enumerate(prior_page_ids, start=1)
+                    if index not in current.page_indexes
+                ),
+            ),
+            operation_id=operation_id,
+        )
+        for page in patch.pages:
+            prior_page_ids[page.page_index - 1] = self._write_artifact(
+                run_id,
+                f"planning/pages/{page.page_index}",
+                "planning.page_spec",
+                "page_spec",
+                page,
+                (patch_id,),
+                operation_id=operation_id,
+            )
+        self.store.complete_plan(
+            step.step_id,
+            brief_id=brief_id,
+            outline_id=outline_id,
+            design_id=design_id,
+            page_specs_id=patch_id,
+            page_ids=tuple(prior_page_ids),
+        )
 
     async def _build_brief(self, run_id: str, step: PlanningStep) -> bool:
         current = self.store.current_input(run_id)
@@ -466,7 +725,7 @@ class DeckPlanningWorkflow:
             brief_id = self._one_ref(run_id, "build_brief")
             outline_id = self._one_ref(run_id, "build_outline")
             design_id = self._one_ref(run_id, "build_design_system")
-            page_ids = self.store.stage_output_refs(run_id, "build_page_specs")
+            page_ids = refs[3:]
             bundle = PlanningBundle(
                 brief_artifact_id=brief_id,
                 outline_artifact_id=outline_id,
@@ -623,6 +882,41 @@ class DeckPlanningWorkflow:
         outputs = self.artifacts.list_by_operation(operation_id)
         if not outputs:
             return False
+        if step.stage == "build_plan":
+            by_kind = {
+                item.kind: item.id
+                for item in outputs
+                if item.kind != "planning.page_spec"
+            }
+            required = (
+                "planning.brief",
+                "planning.outline",
+                "planning.design_system",
+                "planning.page_specs",
+            )
+            if any(kind not in by_kind for kind in required):
+                return False
+            aggregate_id = by_kind["planning.page_specs"]
+            pages = PageSpecs.model_validate(self._read_payload(aggregate_id))
+            page_by_logical_id = {
+                item.logical_id: item.id
+                for item in outputs
+                if item.kind == "planning.page_spec"
+            }
+            logical_ids = tuple(
+                f"planning/pages/{page.page_index}" for page in pages.pages
+            )
+            if any(logical_id not in page_by_logical_id for logical_id in logical_ids):
+                return False
+            self.store.complete_plan(
+                step.step_id,
+                brief_id=by_kind["planning.brief"],
+                outline_id=by_kind["planning.outline"],
+                design_id=by_kind["planning.design_system"],
+                page_specs_id=aggregate_id,
+                page_ids=tuple(page_by_logical_id[item] for item in logical_ids),
+            )
+            return True
         expected_kind = {
             "build_brief": "planning.brief",
             "build_outline": "planning.outline",
@@ -696,12 +990,30 @@ class DeckPlanningWorkflow:
         return cast(dict[str, Any], value["payload"])
 
     def _one_ref(self, run_id: str, stage: PlanningStage) -> str:
+        run = self.store.repository.get_run(run_id)
+        if run.workflow_version == 2:
+            refs = self.store.stage_output_refs(run_id, "build_plan")
+            positions = {
+                "build_brief": 0,
+                "build_outline": 1,
+                "build_design_system": 2,
+            }
+            position = positions.get(stage)
+            if position is None or len(refs) <= position:
+                raise RuntimeError(f"{stage} must have exactly one output")
+            return refs[position]
         refs = self.store.stage_output_refs(run_id, stage)
         if len(refs) != 1:
             raise RuntimeError(f"{stage} must have exactly one output")
         return refs[0]
 
     def _all_planning_refs(self, run_id: str) -> tuple[str, ...]:
+        run = self.store.repository.get_run(run_id)
+        if run.workflow_version == 2:
+            refs = self.store.stage_output_refs(run_id, "build_plan")
+            if len(refs) < 5:
+                raise RuntimeError("build_plan must contain complete planning outputs")
+            return (refs[0], refs[1], refs[2], *refs[4:])
         return (
             self._one_ref(run_id, "build_brief"),
             self._one_ref(run_id, "build_outline"),
@@ -712,6 +1024,20 @@ class DeckPlanningWorkflow:
     def _revision_roots(
         self, run_id: str, request: PlanRevisionRequest
     ) -> tuple[str, ...]:
+        run = self.store.repository.get_run(run_id)
+        if run.workflow_version == 2:
+            refs = self.store.stage_output_refs(run_id, "build_plan")
+            if len(refs) < 5:
+                raise RuntimeError("revision requires a complete prior plan")
+            if request.scope == "brief":
+                return (refs[0],)
+            if request.scope in {"outline", "auto"}:
+                return (refs[1],)
+            if request.scope == "design":
+                return (refs[2],)
+            pages = refs[4:]
+            indexes = request.page_indexes or tuple(range(1, len(pages) + 1))
+            return tuple(pages[index - 1] for index in indexes)
         if request.scope == "brief":
             return (self._one_ref(run_id, "build_brief"),)
         if request.scope in {"outline", "auto"}:

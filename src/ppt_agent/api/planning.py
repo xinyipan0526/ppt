@@ -176,20 +176,8 @@ def planning_router(
         try:
             run = await asyncio.to_thread(workflow.store.repository.get_run, run_id)
             planning_input = await asyncio.to_thread(workflow.store.current_input, run_id)
-            brief = await asyncio.to_thread(
-                workflow.store.available_stage_output_refs, run_id, "build_brief"
-            )
-            outline = await asyncio.to_thread(
-                workflow.store.available_stage_output_refs, run_id, "build_outline"
-            )
-            design = await asyncio.to_thread(
-                workflow.store.available_stage_output_refs, run_id, "build_design_system"
-            )
-            pages = await asyncio.to_thread(
-                workflow.store.available_stage_output_refs, run_id, "build_page_specs"
-            )
-            bundle = await asyncio.to_thread(
-                workflow.store.available_stage_output_refs, run_id, "review_plan"
+            refs = await asyncio.to_thread(
+                workflow.store.available_planning_refs, run_id
             )
         except (LookupError, RecordNotFound) as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -198,11 +186,11 @@ def planning_router(
             "status": run.status.value,
             "error": run.error,
             "input_generation": planning_input.generation,
-            "brief_ref": _single_ref(brief),
-            "outline_ref": _single_ref(outline),
-            "design_system_ref": _single_ref(design),
-            "page_spec_refs": list(pages),
-            "bundle_ref": _single_ref(bundle),
+            "brief_ref": _single_ref(refs.brief),
+            "outline_ref": _single_ref(refs.outline),
+            "design_system_ref": _single_ref(refs.design),
+            "page_spec_refs": list(refs.pages),
+            "bundle_ref": _single_ref(refs.bundle),
         }
 
     @router.get("/runs/{run_id}/plan-detail", dependencies=authenticated)
@@ -212,34 +200,26 @@ def planning_router(
         if artifacts is None:
             raise HTTPException(status_code=503, detail="planning artifacts are unavailable")
         try:
-            brief = await asyncio.to_thread(
-                workflow.store.available_stage_output_refs, run_id, "build_brief"
-            )
-            outline = await asyncio.to_thread(
-                workflow.store.available_stage_output_refs, run_id, "build_outline"
-            )
-            design = await asyncio.to_thread(
-                workflow.store.available_stage_output_refs, run_id, "build_design_system"
-            )
-            pages = await asyncio.to_thread(
-                workflow.store.available_stage_output_refs, run_id, "build_page_specs"
-            )
-            bundle = await asyncio.to_thread(
-                workflow.store.available_stage_output_refs, run_id, "review_plan"
+            refs = await asyncio.to_thread(
+                workflow.store.available_planning_refs, run_id
             )
             return {
                 "run_id": run_id,
-                "brief": _read_planning_payload(artifacts, _single_ref(brief)),
-                "outline": _read_planning_payload(artifacts, _single_ref(outline)),
-                "design_system": _read_planning_payload(artifacts, _single_ref(design)),
-                "pages": [_read_planning_payload(artifacts, item) for item in pages],
-                "review_ready": (
-                    len(brief) == 1
-                    and len(outline) == 1
-                    and len(design) == 1
-                    and len(pages) > 0
+                "brief": _read_planning_payload(artifacts, _single_ref(refs.brief)),
+                "outline": _read_planning_payload(artifacts, _single_ref(refs.outline)),
+                "design_system": _read_planning_payload(
+                    artifacts, _single_ref(refs.design)
                 ),
-                "bundle_ready": len(bundle) == 1,
+                "pages": [
+                    _read_planning_payload(artifacts, item) for item in refs.pages
+                ],
+                "review_ready": (
+                    len(refs.brief) == 1
+                    and len(refs.outline) == 1
+                    and len(refs.design) == 1
+                    and len(refs.pages) > 0
+                ),
+                "bundle_ready": len(refs.bundle) == 1,
             }
         except (LookupError, RecordNotFound) as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc

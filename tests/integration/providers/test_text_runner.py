@@ -128,9 +128,10 @@ def success(value: dict[str, object] | None = None) -> StructuredTextResult:
     )
 
 
-def test_success_settles_usage_and_selects_attempt() -> None:
+def test_success_settles_usage_selects_attempt_and_logs_one_terminal(caplog) -> None:
     engine, ledger, service, account_id = setup_services()
     provider = FakeProvider(success())
+    caplog.set_level(logging.INFO, logger="ppt_agent.operations.text_runner")
     try:
         result = asyncio.run(
             TextOperationRunner(service, provider).execute(
@@ -150,6 +151,17 @@ def test_success_settles_usage_and_selects_attempt() -> None:
     assert attempt.status is AttemptStatus.SUCCEEDED
     assert aggregate.selected_attempt_id == attempt.id
     assert reservation.amount_settled == 20
+    records = [
+        record
+        for record in caplog.records
+        if record.name == "ppt_agent.operations.text_runner"
+    ]
+    assert [record.getMessage() for record in records] == [
+        "provider.submitted",
+        "provider.succeeded",
+    ]
+    assert records[-1].elapsed_seconds >= 0
+    assert records[-1].response_id == "resp-1"
 
 
 def test_schema_failure_with_usage_is_charged_and_attempt_fails() -> None:
@@ -208,10 +220,9 @@ def test_confirmed_uncharged_failure_releases_reservation(caplog) -> None:
         engine.dispose()
 
     assert attempt.status is AttemptStatus.FAILED
-    assert attempt.response_summary == {
-        "http_status": 400,
-        "provider_error_type": "invalid_request",
-    }
+    assert attempt.response_summary["http_status"] == 400
+    assert attempt.response_summary["provider_error_type"] == "invalid_request"
+    assert attempt.response_summary["elapsed_seconds"] >= 0
     assert reservation.status is ReservationStatus.RELEASED
     records = [
         record for record in caplog.records
@@ -223,6 +234,7 @@ def test_confirmed_uncharged_failure_releases_reservation(caplog) -> None:
     ]
     assert records[-1].error_code == "invalid_request"
     assert records[-1].http_status == 400
+    assert records[-1].elapsed_seconds >= 0
 
 
 def test_unknown_outcome_holds_budget_and_blocks_automatic_retry(caplog) -> None:
@@ -260,10 +272,14 @@ def test_unknown_outcome_holds_budget_and_blocks_automatic_retry(caplog) -> None
 
     assert provider.calls == 1
     assert attempt.status is AttemptStatus.OUTCOME_UNKNOWN
+    assert attempt.error_code == "unknown_remote_outcome"
+    assert attempt.response_summary is not None
+    assert attempt.response_summary["elapsed_seconds"] >= 0
     assert reservation.status is ReservationStatus.HELD_UNKNOWN
     assert any(
         record.getMessage() == "provider.outcome_unknown"
         and record.error_code == "unknown_remote_outcome"
+        and record.elapsed_seconds >= 0
         for record in caplog.records
     )
 

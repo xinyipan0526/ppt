@@ -33,7 +33,11 @@ class DeterministicTextProvider:
         except json.JSONDecodeError as exc:
             raise ValueError("deterministic provider requires JSON user content") from exc
         title = str(request.json_schema.get("title", ""))
-        if request.schema_name == "brief_decision":
+        if request.schema_name == "initial_plan_decision":
+            value = self._initial_plan(content)
+        elif request.schema_name == "planning_draft":
+            value = self._planning_draft(content)
+        elif request.schema_name == "brief_decision":
             value = self._brief(content)
         elif request.schema_name == "deck_outline":
             value = self._outline(content)
@@ -55,6 +59,56 @@ class DeterministicTextProvider:
             ),
             response_summary={"response_id": f"det-text-{digest[:24]}", "mode": "deterministic"},
         )
+
+    @classmethod
+    def _initial_plan(cls, content: dict) -> dict:
+        decision = cls._brief(content)
+        if decision["kind"] == "clarification_required":
+            return {
+                "kind": "clarification_required",
+                "plan": None,
+                "reason": decision["reason"],
+                "questions": decision["questions"],
+            }
+        brief = decision["brief"]
+        outline = cls._outline({"brief": brief})
+        design = cls._design()
+        pages = cls._pages({"brief": brief, "outline": outline})
+        return {
+            "kind": "ready",
+            "plan": {
+                "brief": brief,
+                "outline": outline,
+                "design_system": design,
+                "page_specs": pages,
+            },
+            "reason": None,
+            "questions": [],
+        }
+
+    @classmethod
+    def _planning_draft(cls, content: dict) -> dict:
+        current = content.get("current_plan")
+        if not isinstance(current, dict):
+            ready = cls._initial_plan(content)
+            if ready["kind"] != "ready":
+                raise ValueError("full revision requires sufficient planning intent")
+            return ready["plan"]
+        if isinstance(current.get("page_specs"), dict):
+            return current
+        brief = current["brief"]
+        outline = current["outline"]
+        pages = current["pages"]
+        return {
+            "brief": brief,
+            "outline": outline,
+            "design_system": current["design_system"],
+            "page_specs": {
+                "brief_page_count": brief["page_count"],
+                "outline": outline,
+                "pages": pages,
+            },
+        }
 
     @staticmethod
     def _brief(content: dict) -> dict:

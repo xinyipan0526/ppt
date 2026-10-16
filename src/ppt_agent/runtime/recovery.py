@@ -22,6 +22,7 @@ from ppt_agent.domain.state_machine import (
     transition_step,
 )
 from ppt_agent.events.persistence import append_event_record
+from ppt_agent.operations.provider import safe_provider_failure_error
 from ppt_agent.storage.database import SessionFactory, session_scope
 from ppt_agent.storage.models import (
     PageRecord,
@@ -91,6 +92,19 @@ class RecoveryCoordinator:
                 for operation in (operations[attempt.operation_id],)
                 if operation.run_id is not None
             }
+            uncertain_by_run: dict[
+                str, tuple[ProviderOperationRecord, ProviderAttemptRecord]
+            ] = {}
+            for attempt in attempts:
+                if attempt.status not in {
+                    AttemptStatus.RECONCILING,
+                    AttemptStatus.CANCEL_REQUESTED,
+                    AttemptStatus.OUTCOME_UNKNOWN,
+                }:
+                    continue
+                operation = operations[attempt.operation_id]
+                if operation.run_id is not None:
+                    uncertain_by_run.setdefault(operation.run_id, (operation, attempt))
 
             runs = list(
                 session.scalars(select(WorkflowRunRecord).order_by(WorkflowRunRecord.id))
@@ -114,6 +128,18 @@ class RecoveryCoordinator:
                     pages_by_run.get(run.id, []),
                     current_time,
                 )
+                uncertain = uncertain_by_run.get(run.id)
+                if uncertain is not None and run.status not in {
+                    RunStatus.SUCCEEDED,
+                    RunStatus.FAILED,
+                    RunStatus.CANCELLED,
+                }:
+                    self._project_uncertain_operation(
+                        session,
+                        run,
+                        steps_by_run.get(run.id, []),
+                        *uncertain,
+                    )
                 if run.status is RunStatus.CANCEL_REQUESTED:
                     cancelling.append(run.id)
                     continue
@@ -138,6 +164,48 @@ class RecoveryCoordinator:
                 waiting_run_ids=tuple(waiting),
                 reconciling_attempt_ids=tuple(sorted(reconciling)),
             )
+
+    @staticmethod
+    def _project_uncertain_operation(
+        session: object,
+        run: WorkflowRunRecord,
+        steps: list[WorkflowStepRecord],
+        operation: ProviderOperationRecord,
+        attempt: ProviderAttemptRecord,
+    ) -> None:
+        error = safe_provider_failure_error(
+            {
+                "code": attempt.error_code or "unknown_remote_outcome",
+                "provider_summary": attempt.response_summary,
+            }
+        )
+        target = next(
+            (step for step in steps if step.id == operation.step_id),
+            None,
+        )
+        changed = False
+        if run.error != error:
+            run.error = error
+            changed = True
+        if target is not None and target.error != error:
+            target.error = error
+            changed = True
+        if not changed:
+            return
+        append_event_record(
+            session,  # type: ignore[arg-type]
+            run_id=run.id,
+            step_id=operation.step_id,
+            operation_id=operation.id,
+            event_type="run.recovery_required",
+            payload={
+                "status": run.status.value,
+                "reason": "provider_outcome_uncertain",
+                "step_id": operation.step_id,
+                "operation_id": operation.id,
+                "error": error,
+            },
+        )
 
     @staticmethod
     def _normalize_interrupted_entities(

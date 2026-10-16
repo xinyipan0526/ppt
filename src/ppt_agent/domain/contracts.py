@@ -1,6 +1,6 @@
 """Versioned domain contracts shared by workflows, storage, and the API."""
 
-from typing import Annotated, Generic, Literal, TypeAlias, TypeVar
+from typing import Annotated, Any, Generic, Literal, TypeAlias, TypeVar
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validator
 
@@ -97,6 +97,32 @@ class PageSpecs(ContractModel):
         return self
 
 
+class PlanningDraft(ContractModel):
+    """One complete, internally consistent planning result."""
+
+    brief: PresentationBrief
+    outline: DeckOutline
+    design_system: DesignSystem
+    page_specs: PageSpecs
+
+    @model_validator(mode="after")
+    def validate_cross_object_consistency(self) -> "PlanningDraft":
+        if len(self.outline.pages) != self.brief.page_count:
+            raise ValueError("outline must match brief page count")
+        if self.page_specs.brief_page_count != self.brief.page_count:
+            raise ValueError("page specs must match brief page count")
+        if self.page_specs.outline != self.outline:
+            raise ValueError("page specs outline must match the planning outline")
+        for outline_page, page in zip(
+            self.outline.pages, self.page_specs.pages, strict=True
+        ):
+            if outline_page.objective != page.objective:
+                raise ValueError(
+                    f"page {page.page_index} objective must match planning outline"
+                )
+        return self
+
+
 class PageSpecPatch(ContractModel):
     """Only the pages selected by a targeted revision."""
 
@@ -136,6 +162,43 @@ class ClarificationQuestion(ContractModel):
     required: bool = True
 
 
+class InitialPlanDecision(ContractModel):
+    """Runtime JSON-schema shape for a complete plan or clarification request."""
+
+    kind: Literal["ready", "clarification_required"]
+    plan: PlanningDraft | None = None
+    reason: str | None = Field(default=None, max_length=1_000)
+    questions: tuple[ClarificationQuestion, ...] = Field(default=(), max_length=4)
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_inactive_branch(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+        normalized = dict(value)
+        if normalized.get("kind") == "ready":
+            normalized["reason"] = None
+            normalized["questions"] = []
+        elif normalized.get("kind") == "clarification_required":
+            normalized["plan"] = None
+        return normalized
+
+    @model_validator(mode="after")
+    def validate_decision(self) -> "InitialPlanDecision":
+        if self.kind == "ready":
+            if self.plan is None or self.reason is not None or self.questions:
+                raise ValueError("ready decision requires only a complete plan")
+        elif (
+            self.plan is not None
+            or not self.reason
+            or not 1 <= len(self.questions) <= 4
+        ):
+            raise ValueError(
+                "clarification_required needs a reason and one to four questions"
+            )
+        return self
+
+
 class BriefReady(ContractModel):
     kind: Literal["ready"] = "ready"
     brief: PresentationBrief
@@ -154,6 +217,19 @@ class BriefDecision(ContractModel):
     brief: PresentationBrief | None = None
     reason: str | None = Field(default=None, max_length=1_000)
     questions: tuple[ClarificationQuestion, ...] = Field(default=(), max_length=4)
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_inactive_branch(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+        normalized = dict(value)
+        if normalized.get("kind") == "ready":
+            normalized["reason"] = None
+            normalized["questions"] = []
+        elif normalized.get("kind") == "clarification_required":
+            normalized["brief"] = None
+        return normalized
 
     @model_validator(mode="after")
     def validate_decision(self) -> "BriefDecision":

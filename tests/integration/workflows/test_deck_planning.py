@@ -14,9 +14,12 @@ from ppt_agent.domain.contracts import (
     BriefDecision,
     DeckOutline,
     DesignSystem,
+    InitialPlanDecision,
     OutlinePage,
     PageSpec,
+    PageSpecPatch,
     PageSpecs,
+    PlanningDraft,
     PresentationBrief,
 )
 from ppt_agent.domain.state_machine import RunEvent, RunStatus, StepEvent, StepStatus
@@ -253,12 +256,19 @@ class ScriptedRunner:
 class FailingRunner:
     async def execute(self, **_kwargs):
         raise ProviderCallError(
-            "temporary_unavailable",
-            True,
+            "unknown_remote_outcome",
+            False,
             False,
             False,
             None,
-            {"http_status": 503},
+            {
+                "provider_error_type": "ReadTimeout",
+                "request_phase": "read",
+                "timeout_seconds": 90,
+                "elapsed_seconds": 90.1,
+                "provider_response_received": False,
+                "raw_response": "must-not-persist",
+            },
         )
 
 
@@ -305,6 +315,21 @@ def planning_outputs(page_count: int = 2) -> list[object]:
     return [BriefDecision(kind="ready", brief=brief), outline, design, pages]
 
 
+def initial_plan_output(page_count: int = 2) -> InitialPlanDecision:
+    brief, outline, design, pages = planning_outputs(page_count)
+    assert isinstance(brief, BriefDecision)
+    assert brief.brief is not None
+    return InitialPlanDecision(
+        kind="ready",
+        plan=PlanningDraft(
+            brief=brief.brief,
+            outline=outline,
+            design_system=design,
+            page_specs=pages,
+        ),
+    )
+
+
 def setup_workflow(outputs: list[object], *, provider_name: str = "deepseek"):
     engine, sessions, store, project_id = setup_store()
     workspace = Path(".cache/test-deck-workflow") / str(uuid4())
@@ -321,6 +346,243 @@ def setup_workflow(outputs: list[object], *, provider_name: str = "deepseek"):
         reservation_minor_units=100,
     )
     return engine, sessions, store, workflow, runner, project_id
+
+
+def test_v2_complete_plan_uses_one_provider_call_and_reaches_review() -> None:
+    engine, sessions, store, workflow, runner, project_id = setup_workflow(
+        [initial_plan_output()]
+    )
+    try:
+        run = asyncio.run(
+            workflow.create_run(project_id=project_id, normalized_text="Roadmap")
+        )
+        asyncio.run(workflow.execute(run.id))
+        waiting = store.repository.get_run(run.id)
+        review = pending_interrupt(sessions, run.id)
+        with session_scope(sessions) as session:
+            operations = session.scalar(
+                select(func.count()).select_from(ProviderOperationRecord)
+            )
+            artifacts = session.scalar(select(func.count()).select_from(ArtifactRecord))
+            steps = list(
+                session.scalars(
+                    select(WorkflowStepRecord)
+                    .where(WorkflowStepRecord.run_id == run.id)
+                    .order_by(WorkflowStepRecord.created_at)
+                )
+            )
+    finally:
+        engine.dispose()
+
+    assert waiting.status is RunStatus.WAITING_FOR_USER
+    assert review is not None
+    assert review.form_schema["schema_name"] == "plan_review"
+    assert len(runner.requests) == 1
+    assert runner.requests[0].schema_name == "initial_plan_decision"
+    assert operations == 1
+    assert artifacts == 6  # brief, outline, design, page aggregate, two pages
+    assert [(step.step_key, step.status) for step in steps] == [
+        ("build_plan", StepStatus.SUCCEEDED),
+        ("review_plan", StepStatus.WAITING_FOR_USER),
+    ]
+
+
+def test_v2_approval_uses_build_plan_page_refs_and_succeeds() -> None:
+    engine, sessions, store, workflow, runner, project_id = setup_workflow(
+        [initial_plan_output()]
+    )
+    try:
+        run = asyncio.run(
+            workflow.create_run(project_id=project_id, normalized_text="Roadmap")
+        )
+        asyncio.run(workflow.execute(run.id))
+        review = pending_interrupt(sessions, run.id)
+        store.repository.resume_interrupt(
+            review.id, expected_version=1, payload={"action": "approve"}
+        )
+        asyncio.run(workflow.execute(run.id))
+        finished = store.repository.get_run(run.id)
+    finally:
+        engine.dispose()
+
+    assert finished.status is RunStatus.SUCCEEDED
+    assert len(runner.requests) == 1
+    refs = store.available_planning_refs(run.id)
+    assert sum(len(group) for group in (refs.brief, refs.outline, refs.design, refs.pages, refs.bundle)) == 6
+
+
+def test_v2_clarification_resume_uses_one_new_full_plan_call() -> None:
+    clarification = InitialPlanDecision(
+        kind="clarification_required",
+        reason="Audience is missing",
+        questions=(
+            {
+                "field": "audience",
+                "question": "Who is the audience?",
+                "reason": "It changes the depth.",
+                "input_type": "text",
+            },
+        ),
+    )
+    engine, sessions, store, workflow, runner, project_id = setup_workflow(
+        [clarification, initial_plan_output()]
+    )
+    try:
+        run = asyncio.run(
+            workflow.create_run(project_id=project_id, normalized_text="Roadmap")
+        )
+        asyncio.run(workflow.execute(run.id))
+        question = pending_interrupt(sessions, run.id)
+        store.repository.resume_interrupt(
+            question.id,
+            expected_version=1,
+            payload={"audience": "engineering leaders"},
+        )
+        asyncio.run(workflow.execute(run.id))
+        review = pending_interrupt(sessions, run.id)
+        with session_scope(sessions) as session:
+            build_steps = list(
+                session.scalars(
+                    select(WorkflowStepRecord)
+                    .where(
+                        WorkflowStepRecord.run_id == run.id,
+                        WorkflowStepRecord.step_key == "build_plan",
+                    )
+                    .order_by(WorkflowStepRecord.generation)
+                )
+            )
+    finally:
+        engine.dispose()
+
+    assert review.form_schema["schema_name"] == "plan_review"
+    assert len(runner.requests) == 2
+    assert len({operation.operation_id for operation in runner.operations}) == 2
+    assert [step.generation for step in build_steps] == [2]
+    assert "engineering leaders" in runner.requests[1].user_content
+
+
+def test_v2_recovery_materializes_committed_plan_without_second_call() -> None:
+    engine, sessions, store, workflow, runner, project_id = setup_workflow(
+        [initial_plan_output()]
+    )
+    original_complete = store.complete_plan
+    crashed = False
+
+    def crash_once(*args, **kwargs):
+        nonlocal crashed
+        if not crashed:
+            crashed = True
+            raise RuntimeError("crash after complete plan artifacts")
+        return original_complete(*args, **kwargs)
+
+    try:
+        run = asyncio.run(
+            workflow.create_run(project_id=project_id, normalized_text="Roadmap")
+        )
+        store.complete_plan = crash_once
+        with pytest.raises(RuntimeError, match="complete plan artifacts"):
+            asyncio.run(workflow.execute(run.id))
+        assert len(runner.requests) == 1
+        store.complete_plan = original_complete
+        store.repository.mark_run_recovery_required(run.id, reason="process restart")
+        store.repository.mark_recovery_retry_safe(
+            run.id, evidence="provider result and plan artifacts are available"
+        )
+        asyncio.run(workflow.execute(run.id))
+        recovered = store.repository.get_run(run.id)
+        review = pending_interrupt(sessions, run.id)
+    finally:
+        engine.dispose()
+
+    assert recovered.status is RunStatus.WAITING_FOR_USER
+    assert review.form_schema["schema_name"] == "plan_review"
+    assert len(runner.requests) == 1
+
+
+def test_v2_targeted_revision_uses_one_call_and_preserves_other_page_ref() -> None:
+    patch = PageSpecPatch(
+        pages=(
+            PageSpec(
+                page_index=2,
+                objective="p2",
+                page_type="content",
+                title="Revised second page",
+            ),
+        )
+    )
+    engine, sessions, store, workflow, runner, project_id = setup_workflow(
+        [initial_plan_output(), patch]
+    )
+    try:
+        run = asyncio.run(
+            workflow.create_run(project_id=project_id, normalized_text="Roadmap")
+        )
+        asyncio.run(workflow.execute(run.id))
+        old_refs = store.stage_output_refs(run.id, "build_plan")[4:]
+        review = pending_interrupt(sessions, run.id)
+        store.repository.resume_interrupt(
+            review.id,
+            expected_version=1,
+            payload={
+                "action": "revise",
+                "feedback": "Make page two concrete",
+                "scope": "pages",
+                "page_indexes": [2],
+            },
+        )
+        asyncio.run(workflow.execute(run.id))
+        new_refs = store.stage_output_refs(run.id, "build_plan")[4:]
+        second_review = pending_interrupt(sessions, run.id)
+    finally:
+        engine.dispose()
+
+    assert second_review.id != review.id
+    assert len(runner.requests) == 2
+    assert runner.requests[-1].schema_name == "page_specs"
+    assert old_refs[0] == new_refs[0]
+    assert old_refs[1] != new_refs[1]
+
+
+def test_v2_full_revision_uses_one_call_returning_planning_draft() -> None:
+    revised = initial_plan_output().plan
+    assert revised is not None
+    revised = revised.model_copy(
+        update={
+            "design_system": revised.design_system.model_copy(
+                update={"visual_style": "calm editorial"}
+            )
+        }
+    )
+    engine, sessions, store, workflow, runner, project_id = setup_workflow(
+        [initial_plan_output(), revised]
+    )
+    try:
+        run = asyncio.run(
+            workflow.create_run(project_id=project_id, normalized_text="Roadmap")
+        )
+        asyncio.run(workflow.execute(run.id))
+        review = pending_interrupt(sessions, run.id)
+        store.repository.resume_interrupt(
+            review.id,
+            expected_version=1,
+            payload={
+                "action": "revise",
+                "feedback": "Use a calmer editorial style",
+                "scope": "design",
+                "page_indexes": [],
+            },
+        )
+        asyncio.run(workflow.execute(run.id))
+        second_review = pending_interrupt(sessions, run.id)
+        design_id = store.stage_output_refs(run.id, "build_plan")[2]
+        design = DesignSystem.model_validate(workflow._read_payload(design_id))
+    finally:
+        engine.dispose()
+
+    assert second_review.id != review.id
+    assert len(runner.requests) == 2
+    assert runner.requests[-1].schema_name == "planning_draft"
+    assert design.visual_style == "calm editorial"
 
 
 def test_uncertain_http_failure_requires_recovery_instead_of_failing_run() -> None:
@@ -341,15 +603,58 @@ def test_uncertain_http_failure_requires_recovery_instead_of_failing_run() -> No
             workflow.create_run(
                 project_id=project_id,
                 normalized_text="Roadmap",
-                workflow_version=1,
             )
         )
         asyncio.run(workflow.execute(run.id))
         snapshot = store.repository.get_run(run.id)
+        with session_scope(sessions) as session:
+            step = session.scalar(
+                select(WorkflowStepRecord).where(WorkflowStepRecord.run_id == run.id)
+            )
+        events = store.repository.list_events(run.id)
+        before = len([event for event in events if event.event_type == "run.recovery_required"])
+        store.repository.mark_run_recovery_required(
+            run.id,
+            reason="unknown_remote_outcome",
+            error=snapshot.error,
+            step_id=step.id,
+            operation_id=next(
+                event.payload["operation_id"]
+                for event in events
+                if event.event_type == "run.recovery_required"
+            ),
+        )
+        after = len(
+            [
+                event
+                for event in store.repository.list_events(run.id)
+                if event.event_type == "run.recovery_required"
+            ]
+        )
     finally:
         engine.dispose()
 
     assert snapshot.status is RunStatus.RECOVERY_REQUIRED
+    expected = {
+        "code": "unknown_remote_outcome",
+        "provider_summary": {
+            "provider_error_type": "ReadTimeout",
+            "request_phase": "read",
+            "timeout_seconds": 90,
+            "elapsed_seconds": 90.1,
+            "provider_response_received": False,
+        },
+    }
+    assert snapshot.error == expected
+    assert step.status is StepStatus.RECOVERY_REQUIRED
+    assert step.error == expected
+    recovery_event = next(
+        event for event in events if event.event_type == "run.recovery_required"
+    )
+    assert recovery_event.payload["step_id"] == step.id
+    assert recovery_event.payload["operation_id"]
+    assert recovery_event.payload["error"] == expected
+    assert after == before
 
 
 def test_known_provider_failure_projects_only_safe_error_on_step_and_run(caplog) -> None:

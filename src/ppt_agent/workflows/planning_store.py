@@ -80,6 +80,15 @@ class PlanningStep:
     input_refs: tuple[str, ...]
 
 
+@dataclass(frozen=True, slots=True)
+class PlanningArtifactRefs:
+    brief: tuple[str, ...]
+    outline: tuple[str, ...]
+    design: tuple[str, ...]
+    pages: tuple[str, ...]
+    bundle: tuple[str, ...]
+
+
 class PlanRevisionRequest(ContractModel):
     action: Literal["revise"] = "revise"
     feedback: str = Field(min_length=1, max_length=4_000)
@@ -332,6 +341,73 @@ class PlanningStore:
                 status=step.status,
             )
 
+    def complete_plan(
+        self,
+        step_id: str,
+        *,
+        brief_id: str,
+        outline_id: str,
+        design_id: str,
+        page_specs_id: str,
+        page_ids: tuple[str, ...],
+    ) -> StepSnapshot:
+        """Atomically publish every artifact produced by one v2 plan call."""
+
+        with session_scope(self._sessions) as session:
+            step = session.get(WorkflowStepRecord, step_id)
+            if step is None:
+                raise LookupError(f"step not found: {step_id}")
+            if step.step_key != "build_plan" or step.status is not StepStatus.RUNNING:
+                raise ValueError("only a running build_plan step can complete")
+            run = session.get(WorkflowRunRecord, step.run_id)
+            if run is None:
+                raise LookupError(f"run not found: {step.run_id}")
+            for page_index, artifact_id in enumerate(page_ids, start=1):
+                page = session.scalar(
+                    select(PageRecord).where(
+                        PageRecord.run_id == step.run_id,
+                        PageRecord.page_index == page_index,
+                    )
+                )
+                if page is None:
+                    page = PageRecord(
+                        id=str(uuid4()),
+                        run_id=step.run_id,
+                        page_index=page_index,
+                        status=PageStatus.PLANNED,
+                    )
+                    session.add(page)
+                page.page_spec_version_id = artifact_id
+            output_refs = (
+                brief_id,
+                outline_id,
+                design_id,
+                page_specs_id,
+                *page_ids,
+            )
+            step.status = StepStatus.SUCCEEDED
+            step.output_refs = list(output_refs)
+            run.brief_version_id = brief_id
+            append_event_record(
+                session,
+                run_id=step.run_id,
+                event_type="step.completed",
+                step_id=step.id,
+                payload={
+                    "step_id": step.id,
+                    "step_key": step.step_key,
+                    "generation": step.generation,
+                    "output_refs": list(output_refs),
+                },
+            )
+            return StepSnapshot(
+                id=step.id,
+                run_id=step.run_id,
+                step_key=step.step_key,
+                generation=step.generation,
+                status=step.status,
+            )
+
     def stage_output_refs(self, run_id: str, stage: PlanningStage) -> tuple[str, ...]:
         with session_scope(self._sessions) as session:
             step = session.scalar(
@@ -359,6 +435,34 @@ class PlanningStore:
             ):
                 return ()
         return refs
+
+    def available_planning_refs(self, run_id: str) -> PlanningArtifactRefs:
+        run = self.repository.get_run(run_id)
+        bundle = self.available_stage_output_refs(run_id, "review_plan")
+        if run.workflow_version == 1:
+            return PlanningArtifactRefs(
+                brief=self.available_stage_output_refs(run_id, "build_brief"),
+                outline=self.available_stage_output_refs(run_id, "build_outline"),
+                design=self.available_stage_output_refs(
+                    run_id, "build_design_system"
+                ),
+                pages=self.available_stage_output_refs(run_id, "build_page_specs"),
+                bundle=bundle,
+            )
+        if run.workflow_version == 2:
+            refs = self.available_stage_output_refs(run_id, "build_plan")
+            if len(refs) < 5:
+                return PlanningArtifactRefs((), (), (), (), bundle)
+            return PlanningArtifactRefs(
+                brief=(refs[0],),
+                outline=(refs[1],),
+                design=(refs[2],),
+                pages=refs[4:],
+                bundle=bundle,
+            )
+        raise ValueError(
+            f"unsupported deck planning workflow version: {run.workflow_version}"
+        )
 
     def step_resume_payload(self, step_id: str) -> dict | None:
         with session_scope(self._sessions) as session:

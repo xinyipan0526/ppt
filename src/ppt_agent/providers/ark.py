@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
+from time import monotonic
 from typing import Any, Literal, overload
 
 import httpx
@@ -15,6 +16,10 @@ from ppt_agent.providers.text import (
     StructuredTextRequest,
     StructuredTextResult,
     TextUsage,
+)
+from ppt_agent.providers.image import (
+    sanitize_provider_diagnostic_identifier,
+    sanitize_provider_error_message,
 )
 from ppt_agent.providers.vision import (
     OCRRequest,
@@ -85,6 +90,7 @@ class ArkMultimodalAdapter:
         self._api_key = api_key
         self._base_url = base_url.rstrip("/")
         self._client = client
+        self._timeout_seconds = float(timeout_seconds)
         self._timeout = httpx.Timeout(timeout_seconds)
 
     async def complete(self, request: StructuredTextRequest) -> StructuredTextResult:
@@ -110,7 +116,6 @@ class ArkMultimodalAdapter:
                 request.schema_name, request.schema_version, request.json_schema
             )},
             "max_output_tokens": request.max_output_tokens,
-            "user": request.user_id,
         }
         payload = await self._post(body, kind="text")
         usage = self._text_usage(payload.get("usage"))
@@ -209,6 +214,7 @@ class ArkMultimodalAdapter:
     ) -> dict[str, Any]:
         owns_client = self._client is None
         client = self._client or httpx.AsyncClient()
+        started_at = monotonic()
         try:
             try:
                 response = await client.post(
@@ -221,6 +227,21 @@ class ArkMultimodalAdapter:
                     timeout=self._timeout,
                 )
             except httpx.RequestError as exc:
+                elapsed_seconds = max(monotonic() - started_at, 0.0)
+                summary: dict[str, object] = {
+                    "provider_error_type": type(exc).__name__,
+                    "elapsed_seconds": elapsed_seconds,
+                    "provider_response_received": False,
+                }
+                if isinstance(exc, httpx.TimeoutException):
+                    summary.update(
+                        {
+                            "request_phase": self._timeout_phase(exc),
+                            "timeout_seconds": self._timeout_seconds,
+                        }
+                    )
+                else:
+                    summary["exception_type"] = type(exc).__name__
                 raise self._call_error(
                     kind,
                     code="unknown_remote_outcome",
@@ -228,7 +249,7 @@ class ArkMultimodalAdapter:
                     billing_known=False,
                     confirmed_uncharged=False,
                     usage=None,
-                    summary={"exception_type": type(exc).__name__},
+                    summary=summary,
                 ) from exc
         finally:
             if owns_client:
@@ -238,6 +259,51 @@ class ArkMultimodalAdapter:
                 response.status_code, ("temporary_unavailable", False)
             )
             known = response.status_code in _PROVABLY_UNCHARGED_STATUSES
+            summary: dict[str, object] = {
+                "http_status": response.status_code,
+                "provider_error_type": code,
+                "elapsed_seconds": max(monotonic() - started_at, 0.0),
+                "provider_response_received": True,
+            }
+            request_id = next(
+                (
+                    sanitize_provider_diagnostic_identifier(
+                        response.headers.get(header),
+                        sensitive_values=(self._api_key,),
+                    )
+                    for header in ("x-request-id", "x-tt-logid", "x-requestid")
+                    if response.headers.get(header)
+                ),
+                None,
+            )
+            if request_id is not None:
+                summary["provider_request_id"] = request_id
+            try:
+                error_payload = response.json().get("error", {})
+            except (AttributeError, TypeError, ValueError):
+                error_payload = {}
+            message = (
+                error_payload.get("message")
+                if isinstance(error_payload, dict)
+                else None
+            )
+            if isinstance(message, str) and not any(
+                marker in message.casefold()
+                for marker in (
+                    "api_key",
+                    "apikey",
+                    "authorization",
+                    "cookie",
+                    "prompt",
+                    "secret",
+                    "source content",
+                )
+            ):
+                safe_message = sanitize_provider_error_message(
+                    message, sensitive_values=(self._api_key,)
+                )
+                if safe_message and safe_message != "[REDACTED]":
+                    summary["provider_error_message"] = safe_message
             raise self._call_error(
                 kind,
                 code=code,
@@ -245,10 +311,7 @@ class ArkMultimodalAdapter:
                 billing_known=known,
                 confirmed_uncharged=known,
                 usage=None,
-                summary={
-                    "http_status": response.status_code,
-                    "provider_error_type": code,
-                },
+                summary=summary,
             )
         try:
             payload = response.json()
@@ -259,6 +322,14 @@ class ArkMultimodalAdapter:
             if kind == "text":
                 raise self._invalid_text_success(None, "invalid_json_response") from exc
             raise self._invalid_vision_success(None, "invalid_json_response") from exc
+
+    @staticmethod
+    def _timeout_phase(error: httpx.TimeoutException) -> str:
+        if isinstance(error, (httpx.ConnectTimeout, httpx.PoolTimeout)):
+            return "connect"
+        if isinstance(error, httpx.WriteTimeout):
+            return "write"
+        return "read"
 
     @staticmethod
     def _vision_body(

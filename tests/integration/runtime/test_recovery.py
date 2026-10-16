@@ -6,7 +6,7 @@ from ppt_agent.domain.state_machine import AttemptStatus, RunStatus, StepStatus
 from ppt_agent.runtime.recovery import RecoveryCoordinator
 from ppt_agent.runtime.repository import WorkflowRepository
 from ppt_agent.storage.database import DatabaseConfig, create_session_factory, create_sqlite_engine, session_scope
-from ppt_agent.storage.models import Base, ProjectRecord, ProviderAttemptRecord, ProviderOperationRecord, WorkflowRunRecord, WorkflowStepRecord
+from ppt_agent.storage.models import Base, ProjectRecord, ProviderAttemptRecord, ProviderOperationRecord, WorkflowEventRecord, WorkflowRunRecord, WorkflowStepRecord
 
 
 def test_recovery_reconciles_remote_attempt_before_blocking_its_run() -> None:
@@ -22,7 +22,7 @@ def test_recovery_reconciles_remote_attempt_before_blocking_its_run() -> None:
             session.add(WorkflowRunRecord(id=run_id, project_id=project_id, workflow_name="deck", workflow_version=1, status=RunStatus.RUNNING))
             session.add(WorkflowStepRecord(id=step_id, run_id=run_id, step_key="generate", generation=1, status=StepStatus.RUNNING, attempt_count=1, idempotency_key=str(uuid4())))
             session.add(ProviderOperationRecord(id=operation_id, operation_kind="image.generate", request_fingerprint="sha256:x", provider="p", model="m", aggregate_status="in_progress", selected_attempt_id=None, has_unknown_attempts=False, run_id=run_id, step_id=step_id))
-            session.add(ProviderAttemptRecord(id=str(uuid4()), operation_id=operation_id, attempt_no=1, status=AttemptStatus.SUBMITTED, reservation_id="reservation-placeholder"))
+            session.add(ProviderAttemptRecord(id=str(uuid4()), operation_id=operation_id, attempt_no=1, status=AttemptStatus.SUBMITTED, reservation_id="reservation-placeholder", error_code="unknown_remote_outcome", response_summary={"request_phase": "read", "timeout_seconds": 90, "provider_response_received": False, "raw_response": "secret"}))
             # This focused test bypasses ledger creation, so disable FK checks for fixture insertion.
             session.connection().exec_driver_sql("PRAGMA foreign_keys=OFF")
 
@@ -31,6 +31,11 @@ def test_recovery_reconciles_remote_attempt_before_blocking_its_run() -> None:
             run = session.get(WorkflowRunRecord, run_id)
             step = session.get(WorkflowStepRecord, step_id)
             attempt = session.scalar(__import__("sqlalchemy").select(ProviderAttemptRecord))
+            recovery_event = session.scalar(
+                __import__("sqlalchemy").select(WorkflowEventRecord).where(
+                    WorkflowEventRecord.event_type == "run.recovery_required"
+                )
+            )
     finally:
         engine.dispose()
 
@@ -39,6 +44,18 @@ def test_recovery_reconciles_remote_attempt_before_blocking_its_run() -> None:
     assert run.status is RunStatus.RECOVERY_REQUIRED
     assert step.status is StepStatus.RECOVERY_REQUIRED
     assert attempt.status is AttemptStatus.RECONCILING
+    assert run.error == {
+        "code": "unknown_remote_outcome",
+        "provider_summary": {
+            "request_phase": "read",
+            "timeout_seconds": 90,
+            "provider_response_received": False,
+        },
+    }
+    assert step.error == run.error
+    assert recovery_event.step_id == step_id
+    assert recovery_event.operation_id == operation_id
+    assert recovery_event.payload["error"] == run.error
 
 
 def test_recovery_blocks_unproven_restart_and_queues_due_retry_idempotently() -> None:
@@ -93,3 +110,36 @@ def test_recovery_does_not_replay_interrupted_local_step_without_proof() -> None
     assert retried.status is RunStatus.QUEUED
     assert recovered_step.status is StepStatus.PENDING
     assert "retry_safe_evidence" in recovered_step.recovery_metadata
+
+
+def test_recovery_does_not_project_historical_unknown_attempt_onto_terminal_run() -> None:
+    directory = Path(".cache/test-recovery")
+    directory.mkdir(parents=True, exist_ok=True)
+    engine = create_sqlite_engine(DatabaseConfig(path=directory / f"{uuid4()}.db"))
+    Base.metadata.create_all(engine)
+    sessions = create_session_factory(engine)
+    project_id, run_id, step_id, operation_id = (str(uuid4()) for _ in range(4))
+    try:
+        with session_scope(sessions) as session:
+            session.connection().exec_driver_sql("PRAGMA foreign_keys=OFF")
+            session.add(ProjectRecord(id=project_id, name="Terminal recovery"))
+            session.add(WorkflowRunRecord(id=run_id, project_id=project_id, workflow_name="deck", workflow_version=1, status=RunStatus.SUCCEEDED))
+            session.add(WorkflowStepRecord(id=step_id, run_id=run_id, step_key="generate", generation=1, status=StepStatus.SUCCEEDED, attempt_count=1, idempotency_key=str(uuid4())))
+            session.add(ProviderOperationRecord(id=operation_id, operation_kind="image.generate", request_fingerprint="sha256:x", provider="p", model="m", aggregate_status="outcome_unknown", selected_attempt_id=None, has_unknown_attempts=True, run_id=run_id, step_id=step_id))
+            session.add(ProviderAttemptRecord(id=str(uuid4()), operation_id=operation_id, attempt_no=1, status=AttemptStatus.OUTCOME_UNKNOWN, reservation_id="reservation-placeholder", error_code="unknown_remote_outcome", response_summary={"request_phase": "read"}))
+
+        plan = RecoveryCoordinator(sessions).recover()
+        with session_scope(sessions) as session:
+            run = session.get(WorkflowRunRecord, run_id)
+            recovery_events = list(session.scalars(
+                __import__("sqlalchemy").select(WorkflowEventRecord).where(
+                    WorkflowEventRecord.event_type == "run.recovery_required"
+                )
+            ))
+    finally:
+        engine.dispose()
+
+    assert run.status is RunStatus.SUCCEEDED
+    assert run.error is None
+    assert recovery_events == []
+    assert run_id not in plan.blocked_run_ids

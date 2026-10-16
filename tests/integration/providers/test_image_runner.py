@@ -1,4 +1,5 @@
 import asyncio
+import logging
 from pathlib import Path
 from uuid import uuid4
 
@@ -12,6 +13,7 @@ from ppt_agent.providers.image import (
     ImageGenerationRequest,
     ImageGenerationResult,
     ImageInput,
+    ImageProviderCallError,
     ImageUsage,
 )
 from ppt_agent.providers.catalog import DEFAULT_MODEL_CATALOG
@@ -168,3 +170,168 @@ def test_tiered_usage_is_reserved_and_settled_with_reference_charges() -> None:
         engine.dispose()
 
     assert ledger.get_account(account.id).settled == 64
+
+
+def test_known_image_failure_logs_provider_message_and_persists_safe_summary(
+    caplog,
+) -> None:
+    path = Path(".cache/test-image-runner") / f"{uuid4()}.db"
+    engine = create_sqlite_engine(DatabaseConfig(path=path))
+    Base.metadata.create_all(engine)
+    sessions = create_session_factory(engine)
+    project_id = str(uuid4())
+    with session_scope(sessions) as session:
+        session.add(ProjectRecord(id=project_id, name="Image failure"))
+    account = CostLedger(sessions).create_account(
+        project_id, "visual", "CNY", 1000
+    )
+    operations = ProviderOperationService(sessions)
+    request = ImageGenerationRequest(
+        "seedream", "private prompt", 320, 180, "user"
+    )
+    operation = PrepareAttempt(
+        "failed-image-op",
+        "image.generate",
+        "placeholder",
+        "seedream",
+        "seedream",
+        account.id,
+        10,
+        "CNY",
+        "v1",
+        "key",
+        page_id=None,
+    )
+
+    class FailingProvider:
+        async def generate(self, _request):
+            raise ImageProviderCallError(
+                "invalid_request",
+                False,
+                True,
+                True,
+                None,
+                {
+                    "http_status": 400,
+                    "provider_error_type": "invalid_request",
+                    "provider_error_code": "InvalidParameter",
+                    "provider_request_id": "request-123",
+                    "provider_error_message": "The requested image size is invalid.",
+                    "raw_response": {"api_key": "must-not-persist-or-log"},
+                },
+            )
+
+    caplog.set_level(logging.INFO, logger="ppt_agent.operations.image_runner")
+    try:
+        with pytest.raises(ImageProviderCallError, match="invalid_request"):
+            asyncio.run(
+                ImageOperationRunner(
+                    operations, FailingProvider(), "seedream"
+                ).execute(
+                    request=request,
+                    operation=operation,
+                    pricing=ImagePricing("v1", "CNY", 10),
+                )
+            )
+        attempt = operations.list_attempts("failed-image-op")[0]
+    finally:
+        engine.dispose()
+
+    assert attempt.response_summary == {
+        "http_status": 400,
+        "provider_error_type": "invalid_request",
+        "provider_request_id": "request-123",
+        "provider_error_message": "The requested image size is invalid.",
+    }
+    records = [
+        record
+        for record in caplog.records
+        if record.name == "ppt_agent.operations.image_runner"
+    ]
+    assert [record.getMessage() for record in records] == [
+        "provider.submitted",
+        "provider.failed",
+    ]
+    assert records[-1].error_code == "invalid_request"
+    assert records[-1].http_status == 400
+    assert records[-1].provider_error_code == "InvalidParameter"
+    assert records[-1].provider_request_id == "request-123"
+    assert (
+        records[-1].provider_error_message
+        == "The requested image size is invalid."
+    )
+    assert not hasattr(records[-1], "raw_response")
+
+
+def test_unknown_image_outcome_logs_provider_message_before_recovery(caplog) -> None:
+    path = Path(".cache/test-image-runner") / f"{uuid4()}.db"
+    engine = create_sqlite_engine(DatabaseConfig(path=path))
+    Base.metadata.create_all(engine)
+    sessions = create_session_factory(engine)
+    project_id = str(uuid4())
+    with session_scope(sessions) as session:
+        session.add(ProjectRecord(id=project_id, name="Unknown image outcome"))
+    account = CostLedger(sessions).create_account(
+        project_id, "visual", "CNY", 1000
+    )
+    operations = ProviderOperationService(sessions)
+    request = ImageGenerationRequest("seedream", "blue", 320, 180, "user")
+    operation = PrepareAttempt(
+        "unknown-image-op",
+        "image.generate",
+        "placeholder",
+        "seedream",
+        "seedream",
+        account.id,
+        10,
+        "CNY",
+        "v1",
+        "key",
+    )
+
+    class FailingProvider:
+        async def generate(self, _request):
+            raise ImageProviderCallError(
+                "temporary_unavailable",
+                True,
+                False,
+                False,
+                None,
+                {
+                    "http_status": 503,
+                    "provider_error_type": "temporary_unavailable",
+                    "provider_error_message": "Upstream image service is overloaded.",
+                },
+            )
+
+    caplog.set_level(logging.INFO, logger="ppt_agent.operations.image_runner")
+    try:
+        with pytest.raises(ImageProviderCallError, match="temporary_unavailable"):
+            asyncio.run(
+                ImageOperationRunner(
+                    operations, FailingProvider(), "seedream"
+                ).execute(
+                    request=request,
+                    operation=operation,
+                    pricing=ImagePricing("v1", "CNY", 10),
+                )
+            )
+        attempt = operations.list_attempts("unknown-image-op")[0]
+    finally:
+        engine.dispose()
+
+    assert attempt.status.value == "outcome_unknown"
+    records = [
+        record
+        for record in caplog.records
+        if record.name == "ppt_agent.operations.image_runner"
+    ]
+    assert [record.getMessage() for record in records] == [
+        "provider.submitted",
+        "provider.outcome_unknown",
+    ]
+    assert records[-1].http_status == 503
+    assert (
+        records[-1].provider_error_message
+        == "Upstream image service is overloaded."
+    )

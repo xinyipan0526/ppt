@@ -1,7 +1,14 @@
 import asyncio
 import json
 
-from ppt_agent.domain.contracts import BriefDecision, DeckOutline, DesignSystem, PageSpecs
+from ppt_agent.domain.contracts import (
+    BriefDecision,
+    DeckOutline,
+    DesignSystem,
+    InitialPlanDecision,
+    PageSpecs,
+    PlanningDraft,
+)
 from ppt_agent.providers.deterministic import DeterministicTextProvider
 from ppt_agent.providers.text import StructuredTextRequest
 
@@ -29,6 +36,59 @@ def test_deterministic_text_provider_builds_complete_planning_chain() -> None:
         "brief": brief.model_dump(mode="json"), "outline": outline.model_dump(mode="json"),
     })))
     assert len(PageSpecs.model_validate(pages.value).pages) == 8
+
+
+def test_deterministic_text_provider_builds_complete_plan_in_one_call() -> None:
+    result = asyncio.run(
+        DeterministicTextProvider().complete(
+            _request(
+                "initial_plan_decision",
+                InitialPlanDecision,
+                {"normalized_text": "Artificial intelligence annual report"},
+            )
+        )
+    )
+
+    decision = InitialPlanDecision.model_validate(result.value)
+
+    assert decision.kind == "ready"
+    assert decision.plan is not None
+    assert len(decision.plan.page_specs.pages) == 8
+
+
+def test_deterministic_text_provider_returns_planning_draft_for_full_revision() -> None:
+    provider = DeterministicTextProvider()
+    initial = asyncio.run(
+        provider.complete(
+            _request(
+                "initial_plan_decision",
+                InitialPlanDecision,
+                {"normalized_text": "Artificial intelligence annual report"},
+            )
+        )
+    )
+    plan = InitialPlanDecision.model_validate(initial.value).plan
+    assert plan is not None
+
+    revised = asyncio.run(
+        provider.complete(
+            _request(
+                "planning_draft",
+                PlanningDraft,
+                {
+                    "normalized_text": "Artificial intelligence annual report",
+                    "current_plan": plan.model_dump(mode="json"),
+                    "revision": {
+                        "feedback": "Use a calmer style",
+                        "scope": "design",
+                        "page_indexes": [],
+                    },
+                },
+            )
+        )
+    )
+
+    assert PlanningDraft.model_validate(revised.value).page_specs.pages
 
 
 def test_deterministic_brief_extracts_compiled_typed_input() -> None:

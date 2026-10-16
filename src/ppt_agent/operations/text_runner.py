@@ -5,6 +5,7 @@ from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 import json
 import logging
+from time import monotonic
 from collections.abc import Callable
 
 from pydantic import ValidationError
@@ -22,6 +23,7 @@ from ppt_agent.providers.text import (
     StructuredTextRequest,
     TextUsage,
 )
+from ppt_agent.providers.image import sanitize_provider_diagnostic_identifier
 
 
 logger = logging.getLogger(__name__)
@@ -107,10 +109,12 @@ class TextOperationRunner:
             "provider.submitted",
             extra=self._log_context(operation, status="submitted", event_type="provider.submitted"),
         )
+        started_at = monotonic()
         try:
             result = await self._provider.complete(request)
         except ProviderCallError as exc:
             summary = safe_provider_failure_summary(exc.safe_summary)
+            summary.setdefault("elapsed_seconds", max(0.0, monotonic() - started_at))
             if exc.usage is not None and exc.billing_known:
                 self._operations.record_charged_failure(
                     prepared.id,
@@ -128,7 +132,11 @@ class TextOperationRunner:
                 )
             else:
                 self._operations.begin_recovery(prepared.id)
-                self._operations.mark_outcome_unknown(prepared.id)
+                self._operations.mark_outcome_unknown(
+                    prepared.id,
+                    error_code=exc.code,
+                    response_summary=summary,
+                )
                 logger.warning(
                     "provider.outcome_unknown",
                     extra=self._log_context(
@@ -157,6 +165,7 @@ class TextOperationRunner:
             if validate_output is not None:
                 validate_output(output)
         except (ValidationError, ValueError) as exc:
+            elapsed_seconds = max(0.0, monotonic() - started_at)
             error = ProviderCallError(
                 code="content_rejected",
                 retryable=False,
@@ -169,6 +178,7 @@ class TextOperationRunner:
                     "validation_error_count": (
                         exc.error_count() if isinstance(exc, ValidationError) else 1
                     ),
+                    "elapsed_seconds": elapsed_seconds,
                 },
             )
             self._operations.record_charged_failure(
@@ -184,6 +194,7 @@ class TextOperationRunner:
                     status="failed",
                     event_type="provider.failed",
                     error_code=error.code,
+                    elapsed_seconds=elapsed_seconds,
                 ),
             )
             raise error from exc
@@ -201,6 +212,19 @@ class TextOperationRunner:
                 "cached_tokens": result.usage.cached_tokens,
                 "reasoning_tokens": result.usage.reasoning_tokens,
             },
+        )
+        response_id = sanitize_provider_diagnostic_identifier(result.response_id)
+        logger.info(
+            "provider.succeeded",
+            extra=self._log_context(
+                operation,
+                status="succeeded",
+                event_type="provider.succeeded",
+                elapsed_seconds=max(0.0, monotonic() - started_at),
+                response_id=response_id,
+                input_tokens=result.usage.input_tokens,
+                output_tokens=result.usage.output_tokens,
+            ),
         )
         return TextOperationResult(
             attempt_id=prepared.id,
@@ -233,9 +257,9 @@ class TextOperationRunner:
 
     @staticmethod
     def _log_context(
-        operation: PrepareAttempt, **context: int | str | None
-    ) -> dict[str, int | str]:
-        values: dict[str, int | str | None] = {
+        operation: PrepareAttempt, **context: bool | float | int | str | None
+    ) -> dict[str, bool | float | int | str]:
+        values: dict[str, bool | float | int | str | None] = {
             "run_id": operation.run_id,
             "step_id": operation.step_id,
             "operation_id": operation.operation_id,

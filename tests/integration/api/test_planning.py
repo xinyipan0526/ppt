@@ -1,4 +1,5 @@
 import asyncio
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from uuid import uuid4
@@ -97,6 +98,7 @@ def setup_api(*, max_characters: int = 100):
         security=LocalHTTPSecurity(token=TOKEN),
         input_limits=InputLimits(max_markdown_characters=max_characters),
     )
+    app.state.planning_workflow = workflow
     return (
         engine,
         app,
@@ -243,6 +245,60 @@ def test_planning_projection_exposes_only_durable_refs_and_status() -> None:
     }
     assert "api_key" not in response.text
     assert "response" not in response.text
+
+
+def test_v2_plan_detail_projects_artifacts_from_single_build_plan_step() -> None:
+    engine, app, store, _, project_id, _, _ = setup_api()
+    artifacts = ArtifactStore(
+        store._sessions, Path(".cache/test-planning-api-artifacts") / str(uuid4())
+    )
+    app.state.planning_workflow.artifacts = artifacts
+    payloads = [
+        ("brief", "planning.brief", {"topic": "Roadmap", "page_count": 2}),
+        ("outline", "planning.outline", {"narrative": "Story", "pages": []}),
+        ("design", "planning.design_system", {"visual_style": "calm"}),
+        ("page-source", "planning.page_specs", {"brief_page_count": 2}),
+        ("page-1", "planning.page_spec", {"page_index": 1, "objective": "p1"}),
+        ("page-2", "planning.page_spec", {"page_index": 2, "objective": "p2"}),
+    ]
+    refs = tuple(
+        commit_artifact(
+            artifacts,
+            project_id=project_id,
+            logical_id=f"planning/{logical_id}",
+            kind=kind,
+            media_type="application/json",
+            extension=".json",
+            payload=json.dumps({"payload": payload}).encode(),
+        ).id
+        for logical_id, kind, payload in payloads
+    )
+    try:
+        run = store.create_run(project_id, (), "Roadmap")
+        step = store.next_step(run.id)
+        store.repository.transition_run(run.id, RunEvent.DISPATCHED)
+        store.repository.transition_step(step.step_id, StepEvent.STARTED)
+        store.complete_plan(
+            step.step_id,
+            brief_id=refs[0],
+            outline_id=refs[1],
+            design_id=refs[2],
+            page_specs_id=refs[3],
+            page_ids=refs[4:],
+        )
+        response = request(
+            app,
+            "GET",
+            f"/api/v1/runs/{run.id}/plan-detail",
+            headers={"host": "localhost:8000", "authorization": f"Bearer {TOKEN}"},
+        )
+    finally:
+        engine.dispose()
+
+    assert response.status_code == 200
+    assert response.json()["review_ready"] is True
+    assert response.json()["brief"]["topic"] == "Roadmap"
+    assert [page["page_index"] for page in response.json()["pages"]] == [1, 2]
 
 
 def test_planning_projection_exposes_only_safe_run_failure_error() -> None:

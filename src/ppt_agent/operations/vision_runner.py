@@ -76,7 +76,11 @@ class VisionOperationRunner:
                 )
             else:
                 self._operations.begin_recovery(prepared.id)
-                self._operations.mark_outcome_unknown(prepared.id)
+                self._operations.mark_outcome_unknown(
+                    prepared.id,
+                    error_code=exc.code,
+                    response_summary=exc.safe_summary,
+                )
             raise
         try:
             output = output_type.model_validate(result.value)
@@ -129,7 +133,11 @@ class OCROperationRunner:
                 )
             else:
                 self._operations.begin_recovery(prepared.id)
-                self._operations.mark_outcome_unknown(prepared.id)
+                self._operations.mark_outcome_unknown(
+                    prepared.id,
+                    error_code=exc.code,
+                    response_summary=exc.safe_summary,
+                )
             raise
         usage_input = _usage_input(prepared.id, operation, pricing, result.usage)
         self._operations.record_success(
