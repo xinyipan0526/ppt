@@ -2,9 +2,10 @@ import { zodResolver } from "@hookform/resolvers/zod";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect } from "react";
 import { useForm } from "react-hook-form";
-import { apiClient, ApiError } from "../../api/client";
+import { apiClient } from "../../api/client";
 import type { ModelCatalogItem, ModelRuntimeSnapshot } from "../../api/contracts";
 import { modelRuntimeSchema, type ModelRuntimeForm } from "./providerSchemas";
+import { ErrorBanner } from "../../components/ErrorBanner";
 
 const emptyForm: ModelRuntimeForm = {
   ark_api_key: "",
@@ -93,7 +94,7 @@ export function ProviderSetup() {
   const models = catalog.data ?? [];
   const multimodal = models.filter((item) => item.category === "multimodal" && item.lifecycle === "stable");
   const images = models.filter((item) => item.category === "image" && item.lifecycle === "stable");
-  const error = save.error instanceof ApiError ? save.error.message : save.error ? "测试或保存失败" : null;
+  const mutationError = save.error ?? remove.error;
 
   return <section>
     <header className="page-head">
@@ -106,7 +107,11 @@ export function ProviderSetup() {
         {status.data?.mode === "cloud" ? "云 API 已启用" : "确定性模式"}
       </span>
     </header>
-    <div className="card panel" style={{ maxWidth: 900 }}>
+    {!configured && <div className="card panel settings-panel settings-notice" role="status">
+      <strong>完成首次配置</strong>
+      <p className="muted">填写 Ark API Key 并选择两个模型。保存前会先验证凭据，密钥不会显示在页面或响应中。</p>
+    </div>}
+    <div className="card panel settings-panel">
       <form className="form-grid" onSubmit={handleSubmit((value) => save.mutate(value))} autoComplete="off">
         <div className="field span-2">
           <label htmlFor="ark-api-key">火山方舟 API Key</label>
@@ -149,7 +154,7 @@ export function ProviderSetup() {
           </div>
         </details>
         {Object.keys(errors).length > 0 && <div className="error-banner span-2">请填写 API Key 并选择两个受支持的模型；高级价格只能是非负整数。</div>}
-        {error && <div className="error-banner span-2">{error}</div>}
+        {mutationError && <ErrorBanner error={mutationError} fallback="测试、保存或删除凭据失败，请稍后重试。" />}
         {save.isSuccess && <div className="success-banner span-2">设置已安全保存，{save.data.activation === "pending" ? "当前任务结束后启用" : "已启用"}。</div>}
         <div className="toolbar end span-2">
           {configured && <button type="button" className="button danger" disabled={remove.isPending} onClick={() => remove.mutate()}>删除凭据</button>}

@@ -5,7 +5,7 @@ from io import BytesIO
 from PIL import Image
 
 
-def export_pdf(pages: tuple[bytes, ...]) -> bytes:
+def export_pdf(pages: tuple[bytes, ...], *, pdf_dpi: int = 144) -> bytes:
     if not pages:
         raise ValueError("at least one page is required")
     images: list[Image.Image] = []
@@ -18,7 +18,7 @@ def export_pdf(pages: tuple[bytes, ...]) -> bytes:
             images.append(image)
         output = BytesIO()
         images[0].save(
-            output, "PDF", save_all=True, append_images=images[1:], resolution=144,
+            output, "PDF", save_all=True, append_images=images[1:], resolution=pdf_dpi,
             title="PPT Agent Export", author="PPT Agent", creator="PPT Agent",
         )
         return output.getvalue()

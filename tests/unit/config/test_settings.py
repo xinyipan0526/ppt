@@ -19,9 +19,16 @@ def test_deterministic_mode_needs_no_keys_and_redacts_effective_view(tmp_path: P
     assert settings.redacted()["providers"]["ark_api_key"] is None
 
 
-def test_cloud_mode_requires_one_ark_key_and_two_exact_model_ids(tmp_path: Path) -> None:
-    with pytest.raises(SettingsError, match="required"):
-        load_settings(None, environ={"PPT_AGENT_WORKSPACE": str(tmp_path), "PPT_AGENT_PROVIDER_MODE": "cloud"})
+def test_cloud_mode_without_complete_credentials_preserves_setup_intent(tmp_path: Path) -> None:
+    pending = load_settings(
+        None,
+        environ={
+            "PPT_AGENT_WORKSPACE": str(tmp_path),
+            "PPT_AGENT_PROVIDER_MODE": "cloud",
+        },
+    )
+    assert pending.provider_mode == "deterministic"
+    assert pending.provider_setup_required is True
     settings = load_settings(None, environ={
         "PPT_AGENT_WORKSPACE": str(tmp_path),
         "PPT_AGENT_PROVIDER_MODE": "cloud",
@@ -30,6 +37,7 @@ def test_cloud_mode_requires_one_ark_key_and_two_exact_model_ids(tmp_path: Path)
         "PPT_AGENT_IMAGE_MODEL_ID": "doubao-seedream-5-0-pro-260628",
     })
     assert settings.provider_mode == "cloud"
+    assert settings.provider_setup_required is False
     assert settings.adapter_id == "volcengine_ark"
     assert settings.redacted()["providers"]["ark_api_key"] == "***configured***"
 
@@ -58,3 +66,45 @@ def test_direct_provider_key_takes_precedence_over_secret_file(tmp_path: Path) -
     })
 
     assert settings.ark_api_key == "environment-secret"
+
+
+def test_automatic_backup_defaults_and_configuration_sources(tmp_path: Path) -> None:
+    defaults = load_settings(None, environ={})
+    assert defaults.backup_enabled is True
+    assert defaults.backup_interval_seconds == 86_400
+    assert defaults.backup_retention == 7
+    assert defaults.backup_shutdown_timeout_seconds == 5
+
+    config = tmp_path / "ppt-agent.toml"
+    config.write_text(
+        "[backup]\n"
+        "enabled=false\n"
+        "interval_seconds=120\n"
+        "retention=3\n"
+        "shutdown_timeout_seconds=2\n",
+        encoding="utf-8",
+    )
+    configured = load_settings(
+        config,
+        environ={"PPT_AGENT_BACKUP_RETENTION": "4"},
+    )
+    assert configured.backup_enabled is False
+    assert configured.backup_interval_seconds == 120
+    assert configured.backup_retention == 4
+    assert configured.backup_shutdown_timeout_seconds == 2
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    (
+        ("PPT_AGENT_BACKUP_ENABLED", "sometimes"),
+        ("PPT_AGENT_BACKUP_INTERVAL_SECONDS", "0"),
+        ("PPT_AGENT_BACKUP_RETENTION", "0"),
+        ("PPT_AGENT_BACKUP_SHUTDOWN_TIMEOUT_SECONDS", "-0.1"),
+    ),
+)
+def test_automatic_backup_settings_reject_invalid_values(
+    name: str, value: str
+) -> None:
+    with pytest.raises(SettingsError):
+        load_settings(None, environ={name: value})

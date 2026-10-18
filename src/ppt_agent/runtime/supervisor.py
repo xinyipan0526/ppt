@@ -64,16 +64,18 @@ class TaskSupervisor:
         return True
 
     async def cancel(self, run_id: str) -> bool:
-        snapshot = await asyncio.to_thread(
-            self._repository.transition_run, run_id, RunEvent.CANCEL_REQUESTED
+        snapshot, accepted = await asyncio.to_thread(
+            self._repository.request_cancellation, run_id
         )
+        if snapshot.status is not RunStatus.CANCEL_REQUESTED:
+            return False
         task = self._tasks.get(run_id)
         if task is not None and not task.done():
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
         if self._cancellation_executor is not None:
             await self._cancellation_executor(run_id)
-        return snapshot.status is RunStatus.CANCEL_REQUESTED
+        return accepted
 
     @asynccontextmanager
     async def provider_slot(self, provider: str) -> AsyncIterator[None]:

@@ -15,6 +15,7 @@ from ppt_agent.storage.database import SessionFactory, session_scope
 from ppt_agent.storage.models import (
     ProviderAttemptRecord,
     ProviderOperationRecord,
+    ProviderRetryAuthorizationRecord,
     WorkflowEventRecord,
     WorkflowRunRecord,
     WorkflowStepRecord,
@@ -96,6 +97,16 @@ class RunTraceService:
                     bucket = attempts_by_operation[attempt.operation_id]
                     if len(bucket) < MAX_ATTEMPTS_PER_OPERATION:
                         bucket.append(attempt)
+            authorized_attempt_ids = set(
+                session.scalars(
+                    select(ProviderRetryAuthorizationRecord.unknown_attempt_id)
+                    .where(
+                        ProviderRetryAuthorizationRecord.operation_id.in_(
+                            attempts_by_operation
+                        )
+                    )
+                )
+            ) if attempts_by_operation else set()
 
             return {
                 "run": _run(run),
@@ -105,7 +116,7 @@ class RunTraceService:
                     {
                         "operation": _operation(operation),
                         "attempts": [
-                            _attempt(attempt)
+                            _attempt(attempt, retry_authorized=attempt.id in authorized_attempt_ids)
                             for attempt in attempts_by_operation[operation.id]
                         ],
                     }
@@ -166,12 +177,13 @@ def _operation(record: ProviderOperationRecord) -> dict[str, object]:
     }
 
 
-def _attempt(record: ProviderAttemptRecord) -> dict[str, object]:
+def _attempt(record: ProviderAttemptRecord, *, retry_authorized: bool) -> dict[str, object]:
     safe_error = safe_provider_failure_error({"code": record.error_code})
     return {
         "id": record.id,
         "attempt_no": record.attempt_no,
         "status": record.status.value,
+        "retry_authorized": retry_authorized,
         "request_started_at": _datetime(record.request_started_at),
         "response_received_at": _datetime(record.response_received_at),
         "error_code": safe_error["code"] if record.error_code is not None else None,

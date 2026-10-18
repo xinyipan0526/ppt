@@ -1,5 +1,7 @@
 import { expect, test } from "@playwright/test";
 
+test.use({ trace: "off", screenshot: "off" });
+
 test("Ark secret leaves no browser-persistent or rendered trace", async ({ page }) => {
   const secret = "ark-e2e-secret";
   const submittedBodies: string[] = [];
@@ -48,6 +50,7 @@ test("Ark secret leaves no browser-persistent or rendered trace", async ({ page 
     configuration_version: 2,
     pricing_overrides: {},
     legacy_configuration_detected: false,
+    setup_required: false,
   };
   const emptySnapshot = {
     ...savedSnapshot,

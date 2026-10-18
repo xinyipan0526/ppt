@@ -718,6 +718,10 @@ class ExportRecord(TimestampMixin, Base):
     __tablename__ = "exports"
     __table_args__ = (
         UniqueConstraint("project_id", "manifest_fingerprint", name="uq_export_manifest"),
+        CheckConstraint(
+            "status IN ('queued','running','available','failed','cancelled')",
+            name="ck_exports_status",
+        ),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
@@ -737,6 +741,9 @@ class ExportRecord(TimestampMixin, Base):
     forced: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     risk_acknowledgement: Mapped[str | None] = mapped_column(String(1000))
     error: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class PageEditRecord(TimestampMixin, Base):

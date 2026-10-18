@@ -6,7 +6,9 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import asdict
+import logging
 from typing import AsyncIterator
+from uuid import uuid4
 
 from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Request, Response
 from fastapi.encoders import jsonable_encoder
@@ -33,6 +35,7 @@ from ppt_agent.runtime.application import ApplicationRuntime
 
 
 RunAuthorizer = Callable[[str], Awaitable[None]]
+_LOGGER = logging.getLogger("ppt_agent.api")
 
 
 class HealthResponse(BaseModel):
@@ -80,11 +83,43 @@ def create_app(
 
     @app.middleware("http")
     async def enforce_local_transport(request: Request, call_next: Callable) -> object:
+        correlation_id = uuid4().hex
+        request.state.correlation_id = correlation_id
         try:
             security.validate_transport(request)
         except LocalRequestRejected as exc:
-            return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
-        return await call_next(request)
+            response = JSONResponse(
+                status_code=exc.status_code, content={"detail": exc.detail}
+            )
+        else:
+            try:
+                response = await call_next(request)
+            except Exception as exc:
+                response = await unhandled_exception(request, exc)
+        response.headers["X-Correlation-ID"] = correlation_id
+        return response
+
+    @app.exception_handler(Exception)
+    async def unhandled_exception(request: Request, exc: Exception) -> JSONResponse:
+        correlation_id = getattr(request.state, "correlation_id", uuid4().hex)
+        _LOGGER.error(
+            "unhandled api exception",
+            extra={
+                "correlation_id": correlation_id,
+                "exception_type": type(exc).__name__,
+            },
+            exc_info=exc,
+        )
+        return JSONResponse(
+            status_code=500,
+            content={
+                "detail": {
+                    "code": "internal_error",
+                    "correlation_id": correlation_id,
+                }
+            },
+            headers={"X-Correlation-ID": correlation_id},
+        )
 
     router = APIRouter(prefix="/api/v1")
 
@@ -108,6 +143,23 @@ def create_app(
     async def browser_session(response: Response) -> object:
         security.establish_browser_session(response)
         return {"csrf_token": security.csrf_token}
+
+    @router.get("/provider-settings", dependencies=[Depends(security.authenticate)])
+    async def provider_settings() -> dict[str, object]:
+        configuration = getattr(app.state, "provider_configuration", None)
+        if configuration is None:
+            return {
+                "mode": "deterministic",
+                "configured": False,
+                "setup_required": False,
+            }
+        snapshot = configuration.activate_if_idle().public_projection()
+        adapter_status = snapshot.get("adapter_status", {})
+        return {
+            "mode": snapshot["mode"],
+            "configured": bool(adapter_status.get("configured")),
+            "setup_required": bool(snapshot.get("setup_required")),
+        }
 
     if event_stream is not None or runtime is not None:
         if authorize_run is None:

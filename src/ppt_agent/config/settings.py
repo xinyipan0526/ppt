@@ -22,6 +22,7 @@ class Settings:
     port: int = 8000
     production: bool = False
     provider_mode: str = "deterministic"
+    provider_setup_required: bool = False
     adapter_id: str = ARK_ADAPTER_ID
     ark_api_key: str | None = None
     multimodal_model_id: str | None = None
@@ -56,6 +57,10 @@ class Settings:
     )
     global_concurrency: int = 4
     project_concurrency: int = 2
+    backup_enabled: bool = True
+    backup_interval_seconds: float = 86_400.0
+    backup_retention: int = 7
+    backup_shutdown_timeout_seconds: float = 5.0
 
     def redacted(self) -> dict[str, Any]:
         def secret(value: str | None) -> str | None:
@@ -66,6 +71,7 @@ class Settings:
             "server": {"host": self.host, "port": self.port, "production": self.production},
             "providers": {
                 "mode": self.provider_mode,
+                "setup_required": self.provider_setup_required,
                 "adapter_id": self.adapter_id,
                 "ark_api_key": secret(self.ark_api_key),
                 "multimodal_model_id": self.multimodal_model_id,
@@ -101,7 +107,22 @@ class Settings:
                 "chromium_executable": str(self.chromium_executable) if self.chromium_executable else None,
                 "font_roots": [str(item) for item in self.font_roots],
             },
+            "backup": {
+                "enabled": self.backup_enabled,
+                "interval_seconds": self.backup_interval_seconds,
+                "retention": self.backup_retention,
+                "shutdown_timeout_seconds": self.backup_shutdown_timeout_seconds,
+            },
         }
+
+
+def _strict_bool(value: str) -> bool:
+    normalized = value.casefold()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError("expected a boolean value")
 
 
 _ENV_MAP = {
@@ -139,6 +160,13 @@ _ENV_MAP = {
     "PPT_AGENT_FONT_ROOTS": ("font_roots", lambda value: tuple(Path(item.strip()) for item in value.split(os.pathsep) if item.strip())),
     "PPT_AGENT_GLOBAL_CONCURRENCY": ("global_concurrency", int),
     "PPT_AGENT_PROJECT_CONCURRENCY": ("project_concurrency", int),
+    "PPT_AGENT_BACKUP_ENABLED": ("backup_enabled", _strict_bool),
+    "PPT_AGENT_BACKUP_INTERVAL_SECONDS": ("backup_interval_seconds", float),
+    "PPT_AGENT_BACKUP_RETENTION": ("backup_retention", int),
+    "PPT_AGENT_BACKUP_SHUTDOWN_TIMEOUT_SECONDS": (
+        "backup_shutdown_timeout_seconds",
+        float,
+    ),
 }
 
 _SECRET_FILE_ENV_MAP = {
@@ -186,6 +214,12 @@ def load_settings(
     if overrides:
         values.update({key: value for key, value in overrides.items() if value is not None})
     settings = replace(Settings(), **values)
+    if settings.provider_mode == "cloud" and not _has_complete_cloud_configuration(
+        settings
+    ):
+        settings = replace(
+            settings, provider_mode="deterministic", provider_setup_required=True
+        )
     validate_settings(settings)
     return settings
 
@@ -195,6 +229,7 @@ def _toml_values(document: Mapping[str, Any]) -> dict[str, Any]:
     providers = document.get("providers", {})
     auth = document.get("authentication", {})
     runtime = document.get("runtime", {})
+    backup = document.get("backup", {})
     values = {
         "workspace": document.get("workspace"),
         "host": server.get("host"), "port": server.get("port"),
@@ -225,6 +260,12 @@ def _toml_values(document: Mapping[str, Any]) -> dict[str, Any]:
         "font_roots": runtime.get("font_roots"),
         "global_concurrency": runtime.get("global_concurrency"),
         "project_concurrency": runtime.get("project_concurrency"),
+        "backup_enabled": backup.get("enabled"),
+        "backup_interval_seconds": backup.get("interval_seconds"),
+        "backup_retention": backup.get("retention"),
+        "backup_shutdown_timeout_seconds": backup.get(
+            "shutdown_timeout_seconds"
+        ),
     }
     path_fields = {"workspace", "local_access_token_file", "chromium_executable"}
     return {
@@ -244,6 +285,12 @@ def validate_settings(settings: Settings) -> None:
         raise SettingsError("server port must be between 1 and 65535")
     if min(settings.global_concurrency, settings.project_concurrency) < 1:
         raise SettingsError("concurrency limits must be positive")
+    if settings.backup_interval_seconds <= 0:
+        raise SettingsError("backup interval must be positive")
+    if settings.backup_retention < 1:
+        raise SettingsError("backup retention must be positive")
+    if settings.backup_shutdown_timeout_seconds < 0:
+        raise SettingsError("backup shutdown timeout must be non-negative")
     if not settings.font_roots:
         raise SettingsError("at least one approved font root is required")
     if len(settings.pricing_currency) != 3 or not settings.pricing_currency.isupper():
@@ -277,3 +324,11 @@ def validate_settings(settings: Settings) -> None:
             )
         except (KeyError, ValueError) as exc:
             raise SettingsError(str(exc)) from exc
+
+
+def _has_complete_cloud_configuration(settings: Settings) -> bool:
+    return bool(
+        settings.ark_api_key
+        and settings.multimodal_model_id
+        and settings.image_model_id
+    )

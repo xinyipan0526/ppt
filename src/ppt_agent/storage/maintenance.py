@@ -74,6 +74,8 @@ def create_online_backup(
         result = destination.execute("PRAGMA quick_check").fetchall()
         if result != [("ok",)]:
             raise DatabaseIntegrityError("backup integrity verification failed")
+        if destination.execute("PRAGMA foreign_key_check").fetchall():
+            raise DatabaseIntegrityError("backup database foreign keys are invalid")
         revision_row = destination.execute(
             "SELECT version_num FROM alembic_version"
         ).fetchone()
@@ -84,9 +86,11 @@ def create_online_backup(
         ).fetchall()
         artifacts = [tuple(row) for row in artifact_rows]
     except BaseException:
+        destination.close()
+        source.close()
         temporary.unlink(missing_ok=True)
         raise
-    finally:
+    else:
         destination.close()
         source.close()
     try:
@@ -124,9 +128,18 @@ def restore_backup(
     target_path: Path,
     *,
     workspace: Path,
+    dry_run: bool = False,
 ) -> Path | None:
-    """Restore an offline Workspace and reconcile it before releasing its lock."""
+    """Validate or restore an offline Workspace.
 
+    A dry run opens the backup read-only and does not acquire or modify the
+    Workspace. An actual restore holds the process-lifetime Workspace lock
+    through migration, integrity verification, and Artifact reconciliation.
+    """
+
+    if dry_run:
+        _validate_backup(backup_path)
+        return None
     paths = WorkspacePaths(workspace, create=True)
     target_path = paths.verify(target_path, must_exist=False)
     workspace_lock = WorkspaceInstanceLock(paths)
@@ -142,14 +155,7 @@ def _restore_locked(
     target_path: Path,
     paths: WorkspacePaths,
 ) -> Path | None:
-    manifest_path = backup_path.with_suffix(".manifest.json")
-    try:
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as exc:
-        raise DatabaseIntegrityError("backup manifest is missing or invalid") from exc
-    if manifest.get("database_sha256") != _sha256(backup_path):
-        raise DatabaseIntegrityError("backup checksum mismatch")
-    _validate_manifest(manifest)
+    manifest = _validate_backup(backup_path)
     sidecars = tuple(
         Path(f"{target_path}{suffix}") for suffix in ("-wal", "-shm", "-journal")
     )
@@ -228,6 +234,46 @@ def _restore_locked(
     finally:
         engine.dispose()
     return rollback
+
+
+def _validate_backup(backup_path: Path) -> dict[str, object]:
+    """Validate a backup bundle without creating or changing any file."""
+
+    if not backup_path.is_file():
+        raise DatabaseIntegrityError("backup database is missing")
+    manifest_path = backup_path.with_suffix(".manifest.json")
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise DatabaseIntegrityError("backup manifest is missing or invalid") from exc
+    if not isinstance(manifest, dict):
+        raise DatabaseIntegrityError("backup manifest is missing or invalid")
+    _validate_manifest(manifest)
+    if manifest.get("database_sha256") != _sha256(backup_path):
+        raise DatabaseIntegrityError("backup checksum mismatch")
+
+    uri = f"file:{backup_path.resolve().as_posix()}?mode=ro"
+    try:
+        connection = sqlite3.connect(uri, uri=True)
+    except sqlite3.Error as exc:
+        raise DatabaseIntegrityError("backup database cannot be opened") from exc
+    try:
+        if connection.execute("PRAGMA quick_check").fetchall() != [("ok",)]:
+            raise DatabaseIntegrityError("backup database integrity verification failed")
+        if connection.execute("PRAGMA foreign_key_check").fetchall():
+            raise DatabaseIntegrityError("backup database foreign keys are invalid")
+        count, size, inventory_hash = _artifact_inventory(connection)
+    except sqlite3.Error as exc:
+        raise DatabaseIntegrityError("backup database is invalid") from exc
+    finally:
+        connection.close()
+    if (
+        count != manifest["artifact_count"]
+        or size != manifest["artifact_bytes"]
+        or inventory_hash != manifest["artifact_inventory_sha256"]
+    ):
+        raise DatabaseIntegrityError("backup artifact inventory mismatch")
+    return manifest
 
 
 def retain_recent_backups(

@@ -668,7 +668,7 @@ class ArtifactStore:
             )
 
     def collect_garbage(self, *, before: datetime) -> tuple[str, ...]:
-        with self._workspace_resource_lock("maintenance"):
+        with self.maintenance_lock():
             return self._collect_garbage_unlocked(before=before)
 
     def _collect_garbage_unlocked(self, *, before: datetime) -> tuple[str, ...]:
@@ -724,8 +724,15 @@ class ArtifactStore:
         return tuple(collected)
 
     def reconcile(self) -> ReconciliationReport:
-        with self._workspace_resource_lock("maintenance"):
+        with self.maintenance_lock():
             return self._reconcile_unlocked()
+
+    @contextmanager
+    def maintenance_lock(self) -> Iterator[None]:
+        """Serialize Workspace maintenance using the shared lock domain."""
+
+        with self._workspace_resource_lock("maintenance"):
+            yield
 
     def _reconcile_unlocked(self) -> ReconciliationReport:
         recovered: set[str] = set()

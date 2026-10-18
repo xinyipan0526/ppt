@@ -35,6 +35,7 @@ class ModelRuntimeSnapshot:
     configuration_version: int
     pricing_overrides: dict[str, object]
     legacy_configuration_detected: bool = False
+    setup_required: bool = False
 
     def public_projection(self) -> dict[str, object]:
         def model(entry: ModelCatalogEntry | None) -> dict[str, object] | None:
@@ -60,6 +61,7 @@ class ModelRuntimeSnapshot:
             "configuration_version": self.configuration_version,
             "pricing_overrides": dict(self.pricing_overrides),
             "legacy_configuration_detected": self.legacy_configuration_detected,
+            "setup_required": self.setup_required,
         }
 
 
@@ -88,6 +90,10 @@ class ProviderConfigurationService:
         self._configuration_version = 1
         self._legacy_configuration_detected = False
         self._settings = self._load(settings)
+        self._setup_required = (
+            settings.provider_setup_required
+            and self._settings.provider_mode != "cloud"
+        )
 
     @property
     def settings(self) -> Settings:
@@ -116,6 +122,7 @@ class ProviderConfigurationService:
             configuration_version=self._configuration_version,
             pricing_overrides=dict(self._settings.pricing_overrides),
             legacy_configuration_detected=self._legacy_configuration_detected,
+            setup_required=self._setup_required,
         )
 
     def update(
@@ -142,6 +149,7 @@ class ProviderConfigurationService:
             multimodal_model_id=multimodal_model_id,
             image_model_id=image_model_id,
             pricing_overrides=dict(pricing_overrides or {}),
+            provider_setup_required=False,
         )
         validate_settings(candidate)
 
@@ -164,6 +172,7 @@ class ProviderConfigurationService:
         self._settings = candidate
         self._configuration_version += 1
         self._legacy_configuration_detected = False
+        self._setup_required = False
         if self._is_idle():
             self._activate(candidate)
             self._activation = "active"
@@ -178,7 +187,10 @@ class ProviderConfigurationService:
         self.secrets.delete(ARK_ADAPTER_ID)
         try:
             candidate = replace(
-                self._settings, provider_mode="deterministic", ark_api_key=None
+                self._settings,
+                provider_mode="deterministic",
+                ark_api_key=None,
+                provider_setup_required=False,
             )
             self._persist(candidate)
         except Exception:
@@ -186,6 +198,7 @@ class ProviderConfigurationService:
                 self.secrets.replace(ARK_ADAPTER_ID, previous)
             raise
         self._settings = candidate
+        self._setup_required = False
         self._configuration_version += 1
         if self._is_idle():
             self._activate(candidate)

@@ -13,6 +13,12 @@ services:
       PPT_AGENT_PRODUCTION: "true"
     volumes:
       - ppt-agent-data:/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/v1/ready', timeout=4).close()"]
+      interval: 30s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
     restart: unless-stopped
 
 volumes:

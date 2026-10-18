@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 import { useMutation } from "@tanstack/react-query";
-import { apiClient, ApiError } from "../../api/client";
+import { apiClient } from "../../api/client";
+import { ErrorBanner } from "../../components/ErrorBanner";
 
 type Field = {
   name: string;
@@ -12,7 +13,7 @@ type Field = {
   recommended_value?: string | number | string[] | null;
 };
 
-export function ClarificationForm({ runId, interrupt, onDone }: { runId: string; interrupt: { id: string; values: Record<string, unknown> }; onDone: () => void }) {
+export function ClarificationForm({ runId, interrupt, onDone, disabled = false }: { runId: string; interrupt: { id: string; values: Record<string, unknown> }; onDone: () => void; disabled?: boolean }) {
   const schema = (interrupt.values.form_schema ?? {}) as { reason?: string; fields?: Field[] };
   const fields = useMemo(() => schema.fields ?? [], [schema.fields]);
   const initialValues = useMemo(
@@ -37,19 +38,19 @@ export function ClarificationForm({ runId, interrupt, onDone }: { runId: string;
       {fields.map((field) => <div className="field" key={field.name}>
         <label>{field.question ?? field.name}{field.required !== false ? " *" : ""}</label>
         {field.reason && <span className="muted">{field.reason}</span>}
-        <FieldControl field={field} value={values[field.name]} onChange={(value) => setValues((current) => ({ ...current, [field.name]: value }))} />
+        <FieldControl field={field} value={values[field.name]} disabled={disabled} onChange={(value) => setValues((current) => ({ ...current, [field.name]: value }))} />
       </div>)}
     </div>
-    {resume.error && <div className="error-banner">{resume.error instanceof ApiError ? resume.error.message : "提交失败，请重试。"}</div>}
-    <div className="toolbar end" style={{ marginTop: 16 }}>
-      <button className="button primary" onClick={() => resume.mutate()} disabled={resume.isPending || missingRequired}>提交并继续</button>
+    {resume.error && <ErrorBanner error={resume.error} fallback="提交失败，请重试。" />}
+    <div className="toolbar end section-gap">
+      <button className="button primary" onClick={() => resume.mutate()} disabled={disabled || resume.isPending || missingRequired}>提交并继续</button>
     </div>
   </section>;
 }
 
-function FieldControl({ field, value, onChange }: { field: Field; value: unknown; onChange: (value: unknown) => void }) {
+function FieldControl({ field, value, disabled, onChange }: { field: Field; value: unknown; disabled: boolean; onChange: (value: unknown) => void }) {
   if (field.type === "single_select") {
-    return <select value={String(value ?? "")} onChange={(event) => onChange(event.target.value)}>
+    return <select disabled={disabled} value={String(value ?? "")} onChange={(event) => onChange(event.target.value)}>
       <option value="">请选择</option>
       {(field.options ?? []).map((option) => <option key={option} value={option}>{option}</option>)}
     </select>;
@@ -57,14 +58,14 @@ function FieldControl({ field, value, onChange }: { field: Field; value: unknown
   if (field.type === "multi_select") {
     const selected = Array.isArray(value) ? value as string[] : [];
     return <div className="choice-list">{(field.options ?? []).map((option) => <label key={option} className="choice">
-      <input type="checkbox" checked={selected.includes(option)} onChange={(event) => onChange(event.target.checked ? [...selected, option] : selected.filter((item) => item !== option))} />
+      <input type="checkbox" disabled={disabled} checked={selected.includes(option)} onChange={(event) => onChange(event.target.checked ? [...selected, option] : selected.filter((item) => item !== option))} />
       <span>{option}</span>
     </label>)}</div>;
   }
   if (field.type === "number") {
-    return <input type="number" value={value == null ? "" : String(value)} onChange={(event) => onChange(event.target.value === "" ? undefined : event.target.valueAsNumber)} />;
+    return <input type="number" disabled={disabled} value={value == null ? "" : String(value)} onChange={(event) => onChange(event.target.value === "" ? undefined : event.target.valueAsNumber)} />;
   }
-  return <textarea rows={3} value={String(value ?? "")} onChange={(event) => onChange(event.target.value)} />;
+  return <textarea rows={3} disabled={disabled} value={String(value ?? "")} onChange={(event) => onChange(event.target.value)} />;
 }
 
 function hasValue(value: unknown): boolean {

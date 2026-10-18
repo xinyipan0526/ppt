@@ -21,6 +21,18 @@ def _wait_snapshot(client, headers, run_id, statuses, timeout=30):
     raise AssertionError(f"run {run_id} did not reach {statuses}")
 
 
+def _wait_export(client, headers, export_id, timeout=30):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        response = client.get(f"/api/v1/exports/{export_id}", headers=headers)
+        assert response.status_code == 200, response.text
+        snapshot = response.json()
+        if snapshot["status"] in {"available", "failed", "cancelled"}:
+            return snapshot
+        time.sleep(0.05)
+    raise AssertionError(f"export {export_id} did not become terminal")
+
+
 def test_no_key_text_to_eight_page_pptx(tmp_path: Path) -> None:
     token = "d" * 43
     settings = load_settings(None, environ={
@@ -75,11 +87,14 @@ def test_no_key_text_to_eight_page_pptx(tmp_path: Path) -> None:
         assert edited.json()["status"] == "succeeded"
         exported = client.post(f"/api/v1/runs/{production_id}/exports", headers=headers, json={"format": "pptx"})
         assert exported.status_code == 201, exported.text
-        download = client.get(f"/api/v1/exports/{exported.json()['export_id']}/download", headers=headers)
+        export_id = exported.json()["id"]
+        export_snapshot = _wait_export(client, headers, export_id)
+        assert export_snapshot["status"] == "available", export_snapshot
+        download = client.get(f"/api/v1/exports/{export_id}/download", headers=headers)
         assert download.status_code == 200
         assert len(Presentation(BytesIO(download.content)).slides) == 8
         partial = client.get(
-            f"/api/v1/exports/{exported.json()['export_id']}/download",
+            f"/api/v1/exports/{export_id}/download",
             headers={**headers, "Range": "bytes=0-99"},
         )
         assert partial.status_code == 206

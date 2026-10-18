@@ -1,6 +1,9 @@
 import asyncio
+import threading
 from pathlib import Path
 from uuid import uuid4
+
+import pytest
 
 from ppt_agent.domain.state_machine import RunEvent, RunStatus
 from ppt_agent.runtime.repository import WorkflowRepository
@@ -133,3 +136,99 @@ def test_active_run_cancel_executes_durable_cancellation_completion() -> None:
             engine.dispose()
 
     assert asyncio.run(scenario()) is RunStatus.CANCELLED
+
+
+def test_cancelling_a_terminal_run_is_idempotent() -> None:
+    async def scenario() -> tuple[bool, RunStatus]:
+        repository, engine = make_repository()
+
+        async def executor(_run_id: str) -> None:
+            return None
+
+        project = repository.create_project("Supervisor")
+        run = repository.create_run(project, "deck", 1)
+        repository.transition_run(run.id, RunEvent.DISPATCHED)
+        repository.transition_run(run.id, RunEvent.UNRECOVERABLE_FAILURE)
+        supervisor = TaskSupervisor(repository, executor)
+        try:
+            accepted = await supervisor.cancel(run.id)
+            return accepted, repository.get_run(run.id).status
+        finally:
+            engine.dispose()
+
+    accepted, status = asyncio.run(scenario())
+
+    assert accepted is False
+    assert status is RunStatus.FAILED
+
+
+def test_repeat_cancel_retries_only_the_cancellation_finalizer_after_failure() -> None:
+    async def scenario() -> tuple[list[str], list[str], RunStatus]:
+        repository, engine = make_repository()
+        normal: list[str] = []
+        cancelled: list[str] = []
+
+        async def executor(run_id: str) -> None:
+            normal.append(run_id)
+
+        async def finalizer(run_id: str) -> None:
+            cancelled.append(run_id)
+            if len(cancelled) == 1:
+                raise RuntimeError("finalizer interrupted")
+            repository.complete_cancellation(run_id)
+
+        project = repository.create_project("Supervisor")
+        run = repository.create_run(project, "deck", 1)
+        supervisor = TaskSupervisor(repository, executor, cancellation_executor=finalizer)
+        try:
+            with pytest.raises(RuntimeError, match="finalizer"):
+                await supervisor.cancel(run.id)
+            assert repository.get_run(run.id).status is RunStatus.CANCEL_REQUESTED
+            accepted = await supervisor.cancel(run.id)
+            return normal, cancelled, repository.get_run(run.id).status
+        finally:
+            engine.dispose()
+
+    normal, cancelled, status = asyncio.run(scenario())
+    assert normal == []
+    assert len(cancelled) == 2
+    assert status is RunStatus.CANCELLED
+
+
+def test_concurrent_cancellation_returns_one_acceptance_and_one_persisted_noop() -> None:
+    async def scenario() -> tuple[list[bool], RunStatus]:
+        repository, engine = make_repository()
+        reads = threading.Barrier(2, timeout=5)
+
+        class ConcurrentReads:
+            def get_run(self, run_id: str):
+                snapshot = repository.get_run(run_id)
+                reads.wait()
+                return snapshot
+
+            def __getattr__(self, name: str):
+                return getattr(repository, name)
+
+        async def executor(_run_id: str) -> None:
+            return None
+
+        async def complete_cancellation(run_id: str) -> None:
+            repository.complete_cancellation(run_id)
+
+        project = repository.create_project("Supervisor")
+        run = repository.create_run(project, "deck", 1)
+        supervisor = TaskSupervisor(
+            ConcurrentReads(), executor, cancellation_executor=complete_cancellation
+        )
+        try:
+            accepted = list(await asyncio.gather(
+                supervisor.cancel(run.id), supervisor.cancel(run.id)
+            ))
+            return accepted, repository.get_run(run.id).status
+        finally:
+            engine.dispose()
+
+    accepted, status = asyncio.run(scenario())
+
+    assert sorted(accepted) == [False, True]
+    assert status is RunStatus.CANCELLED

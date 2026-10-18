@@ -6,7 +6,12 @@ from typing import Literal
 from PIL import Image
 
 
-def convert_pages(pages: tuple[bytes, ...], output_format: Literal["png", "jpg"]) -> tuple[bytes, ...]:
+def convert_pages(
+    pages: tuple[bytes, ...],
+    output_format: Literal["png", "jpg"],
+    *,
+    jpeg_quality: int = 92,
+) -> tuple[bytes, ...]:
     if not pages:
         raise ValueError("at least one page is required")
     result: list[bytes] = []
@@ -18,7 +23,9 @@ def convert_pages(pages: tuple[bytes, ...], output_format: Literal["png", "jpg"]
             if output_format == "png":
                 image.convert("RGB").save(buffer, "PNG", optimize=True)
             elif output_format == "jpg":
-                image.convert("RGB").save(buffer, "JPEG", quality=92, optimize=True)
+                image.convert("RGB").save(
+                    buffer, "JPEG", quality=jpeg_quality, optimize=True
+                )
             else:
                 raise ValueError("unsupported image export format")
             result.append(buffer.getvalue())

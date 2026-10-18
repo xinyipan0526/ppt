@@ -20,7 +20,7 @@ from ppt_agent.storage.database import (
     create_session_factory,
     create_sqlite_engine,
 )
-from ppt_agent.storage.models import Base
+from ppt_agent.storage.models import Base, WorkflowRunRecord
 
 
 def create_stores() -> tuple[WorkflowRepository, WorkflowEventStore, object]:
@@ -67,6 +67,38 @@ def test_snapshot_then_replay_does_not_lose_intervening_event() -> None:
     assert appended.recorded_at.tzinfo is not None
     assert appended.page_id == "page-1"
     assert appended.trace_id == "trace-1"
+
+
+def test_snapshot_projects_only_safe_run_error_fields() -> None:
+    """A snapshot is browser-facing and must not disclose provider payloads."""
+
+    repository, store, engine = create_stores()
+    try:
+        run_id = create_run(repository)
+        with repository._sessions() as session:
+            run = session.get(WorkflowRunRecord, run_id)
+            assert run is not None
+            run.error = {
+                "code": "invalid_request",
+                "provider_summary": {
+                    "http_status": 400,
+                    "provider_error_type": "invalid_request",
+                    "prompt": "private provider prompt",
+                },
+                "response": "private provider response",
+            }
+            session.commit()
+        snapshot = store.get_run_snapshot(run_id)
+    finally:
+        engine.dispose()
+
+    assert snapshot.run.error == {
+        "code": "invalid_request",
+        "provider_summary": {
+            "http_status": 400,
+            "provider_error_type": "invalid_request",
+        },
+    }
 
 
 def test_concurrent_appends_allocate_unique_contiguous_run_sequences() -> None:

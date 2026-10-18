@@ -14,6 +14,12 @@ from sqlalchemy import Engine
 from ppt_agent.artifacts.store import ArtifactStore, ReconciliationReport
 from ppt_agent.events.store import WorkflowEventStore
 from ppt_agent.runtime.maintenance import EventRetentionTask, ProviderRetryTask
+from ppt_agent.runtime.backup_task import BackupShutdownTimeout, BackupTask
+from ppt_agent.runtime.export_supervisor import (
+    ExportJobs,
+    ExportShutdownTimeout,
+    ExportSupervisor,
+)
 from ppt_agent.runtime.recovery import RecoveryCoordinator, RecoveryPlan
 from ppt_agent.runtime.repository import WorkflowRepository
 from ppt_agent.runtime.supervisor import RunExecutor, TaskSupervisor
@@ -45,6 +51,10 @@ class ApplicationRuntimeConfig:
     maintenance_shutdown_timeout: float = 5.0
     global_limit: int = 4
     project_limit: int = 2
+    backup_enabled: bool = True
+    backup_interval: float = 86_400.0
+    backup_retention: int = 7
+    backup_shutdown_timeout: float = 5.0
 
     def __post_init__(self) -> None:
         if Path(self.database_name).name != self.database_name:
@@ -53,6 +63,12 @@ class ApplicationRuntimeConfig:
             raise ValueError("shutdown_timeout must be non-negative")
         if self.maintenance_shutdown_timeout < 0:
             raise ValueError("maintenance_shutdown_timeout must be non-negative")
+        if self.backup_interval <= 0:
+            raise ValueError("backup_interval must be positive")
+        if self.backup_retention < 1:
+            raise ValueError("backup_retention must be positive")
+        if self.backup_shutdown_timeout < 0:
+            raise ValueError("backup_shutdown_timeout must be non-negative")
 
 
 class PlanningWorkflowExecutor:
@@ -74,6 +90,8 @@ MaterialRuntimeFactory = Callable[
     [SessionFactory, ArtifactStore], MaterialRuntimeComponent
 ]
 
+ExportWorkflowFactory = Callable[[SessionFactory, ArtifactStore], ExportJobs]
+
 
 class ApplicationRuntime:
     """Own all process-lifetime resources and expose readiness explicitly."""
@@ -88,6 +106,7 @@ class ApplicationRuntime:
         migration_runner: Callable[[Path], None] = run_migrations,
         cancellation_executor: RunExecutor | None = None,
         material_runtime_factory: MaterialRuntimeFactory | None = None,
+        export_workflow_factory: ExportWorkflowFactory | None = None,
     ) -> None:
         if (executor is None) == (planning_workflow_factory is None):
             raise ValueError(
@@ -100,6 +119,7 @@ class ApplicationRuntime:
         self._migration_runner = migration_runner
         self._cancellation_executor = cancellation_executor
         self._material_runtime_factory = material_runtime_factory
+        self._export_workflow_factory = export_workflow_factory
         self.capabilities: WorkspaceCapabilities | None = None
         self.engine: Engine | None = None
         self.sessions: SessionFactory | None = None
@@ -109,11 +129,14 @@ class ApplicationRuntime:
         self.supervisor: TaskSupervisor | None = None
         self.planning_workflow: PlanningWorkflowExecutor | None = None
         self.material_runtime: MaterialRuntimeComponent | None = None
+        self.export_workflow: ExportJobs | None = None
+        self.export_supervisor: ExportSupervisor | None = None
         self.recovery_plan: RecoveryPlan | None = None
         self.reconciliation_report: ReconciliationReport | None = None
         self._lock: WorkspaceInstanceLock | None = None
         self._retention: EventRetentionTask | None = None
         self._provider_retries: ProviderRetryTask | None = None
+        self._backup: BackupTask | None = None
         self._file_log_handler: logging.Handler | None = None
         self._ready = False
 
@@ -201,6 +224,13 @@ class ApplicationRuntime:
             ):
                 self.supervisor.schedule(run_id)
 
+            if self._export_workflow_factory is not None:
+                self.export_workflow = self._export_workflow_factory(
+                    sessions, self.artifacts
+                )
+                self.export_supervisor = ExportSupervisor(self.export_workflow)
+                self.export_supervisor.recover()
+
             self._retention = EventRetentionTask(
                 self.event_store,
                 retention=self.config.event_retention,
@@ -212,6 +242,8 @@ class ApplicationRuntime:
             )
             self._provider_retries.start()
             self._ready = True
+            if self.config.backup_enabled:
+                self._start_backup_task(paths, database_path)
         except BaseException:
             try:
                 await self._cleanup_failed_start()
@@ -230,6 +262,20 @@ class ApplicationRuntime:
             self._file_log_handler.flush()
         interrupted: tuple[str, ...] = ()
         failure: BaseException | None = None
+        if self._backup is not None:
+            try:
+                await self._backup.stop(timeout=self.config.backup_shutdown_timeout)
+            except asyncio.CancelledError:
+                # The shielded worker may still be using the database and
+                # ArtifactStore. A later stop retry must retain all resources.
+                raise
+            except BackupShutdownTimeout:
+                raise
+            except BaseException as exc:
+                failure = exc
+                self._backup = None
+            else:
+                self._backup = None
         if self._provider_retries is not None:
             try:
                 await self._provider_retries.stop(
@@ -248,11 +294,41 @@ class ApplicationRuntime:
                 failure = exc
             finally:
                 self._retention = None
-        if self.supervisor is not None:
+        if self.export_supervisor is not None:
+            export_shutdown_timed_out = False
+            export_shutdown_cancelled = False
             try:
-                interrupted = await self.supervisor.shutdown(
+                export_interrupted = await self.export_supervisor.shutdown(
                     timeout=self.config.shutdown_timeout
                 )
+                interrupted = tuple(sorted({*interrupted, *export_interrupted}))
+            except asyncio.CancelledError:
+                # Cancellation of Runtime.stop must not imply cancellation of
+                # the worker thread hidden behind ``asyncio.to_thread``.
+                # Preserve every resource that worker may still access; a
+                # later stop retry will observe its real completion.
+                export_shutdown_cancelled = True
+                raise
+            except ExportShutdownTimeout as exc:
+                # A cancelled ``to_thread`` awaitable does not terminate its
+                # worker.  Retain the engine, ArtifactStore and workspace lock
+                # until a later stop retry observes that the worker exited.
+                failure = failure or exc
+                export_shutdown_timed_out = True
+            except BaseException as exc:
+                failure = failure or exc
+            finally:
+                if not export_shutdown_timed_out and not export_shutdown_cancelled:
+                    self.export_supervisor = None
+                    self.export_workflow = None
+            if export_shutdown_timed_out:
+                raise failure
+        if self.supervisor is not None:
+            try:
+                run_interrupted = await self.supervisor.shutdown(
+                    timeout=self.config.shutdown_timeout
+                )
+                interrupted = tuple(sorted({*interrupted, *run_interrupted}))
             except BaseException as exc:
                 failure = failure or exc
             finally:
@@ -289,6 +365,23 @@ class ApplicationRuntime:
         if failure is not None:
             raise failure
         return interrupted
+
+    def _start_backup_task(
+        self,
+        paths: WorkspacePaths,
+        database_path: Path,
+    ) -> None:
+        if not self._ready or self.artifacts is None:
+            raise RuntimeError("automatic backup requires a ready runtime")
+        self._backup = BackupTask(
+            database_path,
+            paths.resolve("backups"),
+            paths.resolve("trash/backups"),
+            maintenance_lock=self.artifacts.maintenance_lock,
+            interval=self.config.backup_interval,
+            retention=self.config.backup_retention,
+        )
+        self._backup.start()
 
     async def _cleanup_failed_start(self) -> None:
         try:

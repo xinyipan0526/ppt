@@ -81,7 +81,11 @@ def build_application(settings: Settings):
             current.material_runtime is None
             or not current.material_runtime.supervisor.active_material_ids  # type: ignore[attr-defined]
         )
-        return runs_idle and materials_idle
+        exports_idle = (
+            current.export_supervisor is None
+            or not current.export_supervisor.active_export_ids
+        )
+        return runs_idle and materials_idle and exports_idle
 
     def activate(candidate: Settings) -> None:
         current = runtime_ref.get("runtime")
@@ -130,6 +134,9 @@ def build_application(settings: Settings):
             provider_bundle=bundle,
         )
 
+    def export_factory(_sessions, _artifacts):
+        return dispatcher().exporting
+
     runtime: ApplicationRuntime
 
     async def cancel_run(run_id: str) -> None:
@@ -144,9 +151,14 @@ def build_application(settings: Settings):
             minimum_free_bytes=10 * 1024 * 1024,
             global_limit=settings.global_concurrency,
             project_limit=settings.project_concurrency,
+            backup_enabled=settings.backup_enabled,
+            backup_interval=settings.backup_interval_seconds,
+            backup_retention=settings.backup_retention,
+            backup_shutdown_timeout=settings.backup_shutdown_timeout_seconds,
         ),
         planning_workflow_factory=workflow_factory,
         material_runtime_factory=material_factory,
+        export_workflow_factory=export_factory,
         cancellation_executor=cancel_run,
     )
     runtime_ref["runtime"] = runtime
@@ -209,6 +221,7 @@ def build_application(settings: Settings):
         supervisor=_Lazy(lambda: runtime.supervisor),
         editing=_Lazy(lambda: dispatcher().editing),
         exporting=_Lazy(lambda: dispatcher().exporting),
+        export_supervisor=_Lazy(lambda: runtime.export_supervisor),
         artifacts=_Lazy(lambda: runtime.artifacts),
         authorize_project=authorize_project, authorize_run=authorize_run,
         security=security,

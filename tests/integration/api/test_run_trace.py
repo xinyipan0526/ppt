@@ -308,6 +308,7 @@ def test_run_trace_returns_authorized_safe_ordered_projection(tmp_path: Path) ->
         "id": "attempt-1",
         "attempt_no": 1,
         "status": "failed",
+        "retry_authorized": False,
         "request_started_at": payload["operations"][0]["attempts"][0]["request_started_at"],
         "response_received_at": payload["operations"][0]["attempts"][0]["response_received_at"],
         "error_code": "invalid_request",

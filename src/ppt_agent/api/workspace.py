@@ -160,9 +160,14 @@ def workspace_router(
         run_id = await asyncio.to_thread(_page_run_id, sessions, page_id)
         await authorize_run(run_id)
         try:
-            return await asyncio.to_thread(
+            result = await asyncio.to_thread(
                 _page_projection, sessions, artifacts, page_id
             )
+            pending = await asyncio.to_thread(editing.pending_for_page, page_id)
+            result["pending_edit"] = (
+                None if pending is None else _page_edit_projection(pending)
+            )
+            return result
         except LookupError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -217,6 +222,19 @@ def workspace_router(
         )
 
     return router
+
+
+def _page_edit_projection(snapshot) -> dict:
+    target_box = snapshot.plan.target_box
+    return {
+        "id": snapshot.id,
+        "status": snapshot.status,
+        "kind": snapshot.plan.kind,
+        "clarification_question": snapshot.plan.clarification_question,
+        "target_box": (
+            None if target_box is None else target_box.model_dump(mode="json")
+        ),
+    }
 
 
 def _project_summary(session, project: ProjectRecord) -> dict:

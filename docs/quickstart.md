@@ -1,104 +1,79 @@
 # 快速开始
 
-PPT Agent 是本地优先的单用户产品。服务、React 工作台、SQLite、任务调度与
-Artifact 文件都在同一台机器运行；配置云模型后，资料和生成请求才会发送给对应
-Provider。
+本指南只做一件事：用最少步骤启动 PPT Agent，并生成第一份 PPT。
 
-## Windows 本机安装
+## 1. 准备环境
 
-需要 Python 3.12。最终用户不需要安装 Node.js。
+你需要：
+
+- Windows 10/11
+- Python 3.12
+- 本项目源码
+
+以下命令都在项目根目录执行。正常使用不需要安装 Node.js。
+
+## 2. 安装
+
+首次使用时执行：
 
 ```powershell
 py -3.12 -m venv .venv
 & '.\.venv\Scripts\pip.exe' install .
 & '.\.venv\Scripts\playwright.exe' install chromium
 & '.\.venv\Scripts\ppt-agent.exe' doctor
+```
+
+`doctor` 全部通过后即可启动。
+
+## 3. 启动
+
+```powershell
 & '.\.venv\Scripts\ppt-agent.exe' serve
 ```
 
-服务启动后会自动打开 `http://localhost:8000/`。若不希望自动打开浏览器：
+浏览器通常会自动打开。没有自动打开时，访问：
 
-```powershell
-& '.\.venv\Scripts\ppt-agent.exe' serve --no-open
-```
+<http://127.0.0.1:8000>
 
-如果命令提示 `ModuleNotFoundError: No module named 'ppt_agent'`，说明虚拟环境中残留了旧的启动器，或上一次安装被中断。先关闭正在运行的 PPT Agent 窗口，再执行一次强制重装：
+停止服务时，在终端按 `Ctrl+C`。
 
-```powershell
-Get-Process ppt-agent -ErrorAction SilentlyContinue | Stop-Process -Force
-& '.\.venv\Scripts\python.exe' -m pip install --no-cache-dir --force-reinstall .
-& '.\.venv\Scripts\ppt-agent.exe' doctor
-& '.\.venv\Scripts\ppt-agent.exe' serve --no-open
-```
+## 4. 配置火山方舟（可选）
 
-始终使用 `.venv\Scripts\ppt-agent.exe`（或 `.venv\Scripts\python.exe -m ppt_agent.cli`），不要混用系统 Python 环境中的同名命令。
+不配置 API Key 也能使用内置的确定性模式体验完整流程，但不会调用真实云模型。
 
-首次运行会创建 `workspace/`，其中包含 SQLite 状态、版本化 Artifact 和本地 Secret。
-不要把该目录提交到 Git。无 API Key 时系统保持确定性模式，仍可完整验证上传、
-澄清、规划、8 页生成、编辑、恢复和导出流程。
+需要真实生成图片时：
 
-## 第一次制作 PPT
+1. 打开右上角“模型设置”。
+2. 填写一个火山方舟 API Key。
+3. 选择一个多模态模型和一个图片模型。
+4. 点击“测试并启用”。
 
-1. 打开“模型设置”。试用可保持确定性模式；正式生成按
-   [Provider 设置](provider-setup.md)填写一个火山方舟 API Key，并从下拉列表选择一个
-   多模态语言模型和一个图片模型。价格、端点与结果域名已有安全默认值，不要求填写。
-2. 回到“项目”，创建项目。
-3. 上传 Markdown、PDF、PNG、JPEG 或 WebP，也可以直接填写创作意图。
-4. 回答必要的澄清问题；在规划复核页修改每一页内容与设计方向。
-5. 批准后等待生成。关闭浏览器不会取消后台任务，重新打开会从 SQLite 恢复。
-6. 在完整 PPT 画廊中点击页面，分别查看交付文字、设计 Prompt、局部修改 Prompt
-   与不可变历史版本。
-7. 使用“全局重生成”创建新的整套版本，或下载图片型 PPTX、PDF、图片 ZIP。
+模型 ID、区域和常见错误见 [火山方舟模型配置](provider-setup.md)。真实模型调用可能产生费用。
 
-## Docker
+## 5. 生成第一份 PPT
 
-Docker 构建会在独立 Node 阶段编译 React；运行镜像不包含 Node 开发环境。
+1. 创建项目。
+2. 输入主题；也可以上传 Markdown、PDF 或图片资料。
+3. 回答必要的澄清问题。
+4. 检查并批准逐页规划。
+5. 等待生成完成，然后导出 PPTX、PDF、PNG ZIP 或 JPG ZIP。
+
+浏览器关闭不会取消后台任务；重新打开页面后可以继续查看进度。
+
+## Docker 启动（可选）
+
+已经安装 Docker Desktop 时，也可以直接运行：
 
 ```powershell
 docker compose up --build
 ```
 
-打开 `http://localhost:8000/`。数据保存在 `ppt-agent-data` Volume。容器仅映射宿主机
-回环地址，不应直接暴露到公网。
+然后访问 <http://127.0.0.1:8000>。
 
-## 源码开发
+## 遇到问题
 
-```powershell
-& '.\.venv\Scripts\pip.exe' install -e ".[dev]"
-Set-Location web
-npm install
-npm run dev
-```
-
-Vite 开发服务代理 `/api` 到 `127.0.0.1:8000`。生产使用前执行 `npm run build`，
-并将 `web/dist` 内容同步到 `src/ppt_agent/static`；仓库已提交可直接打包的构建产物。
-
-`--reload` 仅用于源码开发。通过 `pip install .` 安装的正式版本不会读取仓库源码：
-拉取更新后必须重新构建/安装并重启 `ppt-agent serve`，浏览器刷新后才会使用新的后端
-与静态资源。
-## Audit logs and safe local inspection
-Each service start writes structured JSONL records below the configured
-workspace at `logs/ppt-agent.jsonl`. The file rotates at 10 MiB and retains
-three backups (`.1` through `.3`). Records contain bounded operational context;
-credentials, authorization headers, raw prompts, source contents, secret paths,
-and sensitive values nested inside structured fields are redacted as
-`[REDACTED]`. Never paste an API key or a raw request/response into a log field.
-
-The browser can show a bounded, project-authorized trace with
-`GET /api/v1/runs/{run_id}/trace`. It includes the Run status/error, steps,
-ordered event types, and safe provider summaries. The default limits are 100
-events and 50 operations; larger requested limits return HTTP 422. The trace
-does not expose input text, source contents, provider payloads, or secrets.
-
-If the HTTP service is unavailable, use SQLite in read-only mode to inspect
-safe identifiers and statuses. From the repository root, replace
-`<run-id>` and run:
-
-```powershell
-& '.\\.venv\\Scripts\\python.exe' -c "import sqlite3; db=sqlite3.connect('workspace/state.db'); db.execute('PRAGMA query_only=ON'); print(*db.execute(\"SELECT run_seq,event_type,occurred_at,step_id,operation_id,trace_id FROM workflow_events WHERE run_id=? ORDER BY run_seq LIMIT 100\", ('<run-id>',)), sep='\\n'); db.close()"
-```
-
-This fallback deliberately selects only trace metadata and never selects the
-`payload`, planning input text, provider request/response data, or secret
-tables. The API trace remains preferable because it applies authentication,
-project ownership, and the same result bounds.
+- 启动失败：先运行 `& '.\.venv\Scripts\ppt-agent.exe' doctor`。
+- 需要修改源码：见 [开发指南](development.md)。
+- 需要调整端口、Workspace、日志或备份：见 [配置与运维](configuration.md)。
+- 不清楚页面如何操作：见 [界面使用指南](ui-guide.md)。
+- 仍无法定位：查看 `workspace/logs/ppt-agent.jsonl`。

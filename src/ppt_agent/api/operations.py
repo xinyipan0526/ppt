@@ -21,6 +21,7 @@ from ppt_agent.storage.models import (
     CostReservationRecord,
     ProviderAttemptRecord,
     ProviderOperationRecord,
+    ProviderRetryAuthorizationRecord,
     UsageRecord,
 )
 
@@ -70,22 +71,28 @@ def operations_router(
             result = operations.authorize_retry_after_unknown(
                 operation_id, unknown_attempt_id=request.expected_attempt_id, acknowledgement=request.reason,
             )
-            if snapshot.run_id and repository is not None and supervisor is not None:
-                repository.mark_recovery_retry_safe(
-                    snapshot.run_id,
-                    evidence=f"user_authorized_retry:{request.expected_attempt_id}",
-                )
-                supervisor.schedule(snapshot.run_id)
         except ProviderRecordNotFound as exc:
             raise HTTPException(status_code=404, detail="operation not found") from exc
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
-        return jsonable_encoder(asdict(result))
+        return {"authorization_id": result}
 
     @router.get("/projects/{project_id}/costs")
     async def project_costs(project_id: str) -> dict:
         await authorize_project(project_id)
         with session_scope(sessions) as session:
+            account_rows = session.execute(
+                select(
+                    BudgetAccountRecord.currency,
+                    func.sum(BudgetAccountRecord.hard_limit),
+                    func.sum(BudgetAccountRecord.settled),
+                    func.sum(BudgetAccountRecord.active_reserved),
+                    func.sum(BudgetAccountRecord.held_unknown),
+                )
+                .where(BudgetAccountRecord.project_id == project_id)
+                .group_by(BudgetAccountRecord.currency)
+                .order_by(BudgetAccountRecord.currency)
+            ).all()
             rows = session.execute(
                 select(UsageRecord.provider, UsageRecord.currency, func.sum(UsageRecord.actual_amount))
                 .join(CostReservationRecord, CostReservationRecord.id == UsageRecord.reservation_id)
@@ -93,7 +100,34 @@ def operations_router(
                 .where(BudgetAccountRecord.project_id == project_id)
                 .group_by(UsageRecord.provider, UsageRecord.currency)
             ).all()
-        return {"project_id": project_id, "totals": [{"provider": provider, "currency": currency, "actual_amount": amount} for provider, currency, amount in rows]}
+        currencies = []
+        for currency, hard_limit, settled, active_reserved, held_unknown in account_rows:
+            hard_limit = int(hard_limit or 0)
+            settled = int(settled or 0)
+            active_reserved = int(active_reserved or 0)
+            held_unknown = int(held_unknown or 0)
+            currencies.append({
+                "currency": currency,
+                "hard_limit": hard_limit,
+                "settled": settled,
+                "active_reserved": active_reserved,
+                "held_unknown": held_unknown,
+                "available": max(
+                    0, hard_limit - settled - active_reserved - held_unknown
+                ),
+            })
+        return {
+            "project_id": project_id,
+            "currencies": currencies,
+            "totals": [
+                {
+                    "provider": provider,
+                    "currency": currency,
+                    "actual_amount": amount,
+                }
+                for provider, currency, amount in rows
+            ],
+        }
 
     @router.post("/runs/{run_id}/authorize-local-retry")
     async def authorize_local_retry(
@@ -110,6 +144,11 @@ def operations_router(
                     ProviderOperationRecord,
                     ProviderOperationRecord.id == ProviderAttemptRecord.operation_id,
                 )
+                .outerjoin(
+                    ProviderRetryAuthorizationRecord,
+                    ProviderRetryAuthorizationRecord.unknown_attempt_id
+                    == ProviderAttemptRecord.id,
+                )
                 .where(
                     ProviderOperationRecord.run_id == run_id,
                     ProviderAttemptRecord.status.in_({
@@ -117,6 +156,7 @@ def operations_router(
                         AttemptStatus.CANCEL_REQUESTED,
                         AttemptStatus.OUTCOME_UNKNOWN,
                     }),
+                    ProviderRetryAuthorizationRecord.id.is_(None),
                 )
             )
         if uncertain:

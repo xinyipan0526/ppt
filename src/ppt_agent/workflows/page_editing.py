@@ -275,6 +275,18 @@ class PageEditingWorkflow:
                 raise LookupError("page edit not found")
             return self._snapshot(edit)
 
+    def pending_for_page(self, page_id: str) -> PageEditSnapshot | None:
+        with session_scope(self._sessions) as session:
+            edit = session.scalar(
+                select(PageEditRecord)
+                .where(
+                    PageEditRecord.page_id == page_id,
+                    PageEditRecord.status == "awaiting_clarification",
+                )
+                .order_by(PageEditRecord.created_at.desc())
+            )
+            return None if edit is None else self._snapshot(edit)
+
     def history(self, page_id: str) -> tuple[GenerationSnapshot, ...]:
         with session_scope(self._sessions) as session:
             records = session.scalars(select(PageGenerationRecord).where(PageGenerationRecord.page_id == page_id).order_by(PageGenerationRecord.generation))

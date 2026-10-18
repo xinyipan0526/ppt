@@ -5,7 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from hashlib import sha256
 import json
-from typing import Literal, Protocol
+import re
+from typing import Iterable, Literal, Protocol
 
 
 ImageProviderErrorCode = Literal[
@@ -18,6 +19,77 @@ ImageProviderErrorCode = Literal[
     "unknown_remote_outcome",
     "invalid_provider_result",
 ]
+
+_MAX_PROVIDER_ERROR_MESSAGE = 512
+_IMAGE_DATA_URI = re.compile(
+    r"data:image/[a-z0-9.+-]+;base64,[a-z0-9+/=_-]+", re.IGNORECASE
+)
+_PROVIDER_DIAGNOSTIC_IDENTIFIER = re.compile(
+    r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\Z"
+)
+
+
+def sanitize_provider_error_message(
+    value: object,
+    *,
+    sensitive_values: Iterable[str | None] = (),
+    opaque_sensitive_values: Iterable[str | None] = (),
+) -> str | None:
+    """Return a bounded one-line diagnostic with known request secrets removed."""
+
+    if not isinstance(value, str):
+        return None
+    message = " ".join(value.split())[:_MAX_PROVIDER_ERROR_MESSAGE]
+    if any(opaque_sensitive_values):
+        return "[REDACTED]"
+    normalized_sensitive_values = {
+        " ".join(item.split()) for item in sensitive_values if item
+    }
+    compact_message = "".join(message.casefold().split())
+    message_tokens = set(re.findall(r"\w+", message.casefold()))
+    for sensitive in normalized_sensitive_values:
+        compact_sensitive = "".join(sensitive.casefold().split())
+        sensitive_tokens = set(re.findall(r"\w+", sensitive.casefold()))
+        if message_tokens.intersection(sensitive_tokens):
+            return "[REDACTED]"
+        if len(compact_sensitive) >= 4 and any(
+            compact_message[index : index + 4] in compact_sensitive
+            for index in range(max(len(compact_message) - 3, 0))
+        ):
+            return "[REDACTED]"
+    for sensitive in sorted(normalized_sensitive_values, key=len, reverse=True):
+        message = re.sub(
+            re.escape(sensitive), "[REDACTED]", message, flags=re.IGNORECASE
+        )
+    message = _IMAGE_DATA_URI.sub("[REDACTED]", message)
+    return message or None
+
+
+def sanitize_provider_diagnostic_identifier(
+    value: object,
+    *,
+    sensitive_values: Iterable[str | None] = (),
+    opaque_sensitive_values: Iterable[str | None] = (),
+) -> str | None:
+    """Return a bounded provider code/request id containing no free-form text."""
+
+    if not isinstance(value, str):
+        return None
+    identifier = value.strip()
+    if not _PROVIDER_DIAGNOSTIC_IDENTIFIER.fullmatch(identifier):
+        return None
+    folded_identifier = identifier.casefold()
+    if any(
+        folded_identifier in sensitive.casefold()
+        for sensitive in sensitive_values
+        if sensitive
+    ):
+        return None
+    if any(
+        identifier in sensitive for sensitive in opaque_sensitive_values if sensitive
+    ):
+        return None
+    return identifier
 
 
 @dataclass(frozen=True, slots=True)
@@ -127,4 +199,3 @@ class ImageProviderCallError(Exception):
 
 class ImageGenerationProvider(Protocol):
     async def generate(self, request: ImageGenerationRequest) -> ImageGenerationResult: ...
-

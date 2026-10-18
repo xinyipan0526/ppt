@@ -1,6 +1,6 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { apiClient } from "../../api/client";
+import { ApiError, apiClient } from "../../api/client";
 import { ProviderSetup } from "./ProviderSetup";
 
 const catalog = [
@@ -64,4 +64,39 @@ it("keeps advanced pricing optional and can reuse an existing credential", async
   await waitFor(() => expect(multimodal.value).toBe("doubao-seed-2-1-lite-260915"));
   expect(screen.getByText("高级设置（可选）")).toBeInTheDocument();
   expect(screen.getByLabelText("火山方舟 API Key")).not.toBeRequired();
+});
+
+it("guides a first-time user through the required Ark configuration", async () => {
+  vi.spyOn(apiClient, "request").mockImplementation(async (path) => {
+    if (path === "/api/v1/model-catalog") return catalog;
+    return status;
+  });
+  render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}><ProviderSetup /></QueryClientProvider>);
+
+  expect(await screen.findByRole("status")).toHaveTextContent("完成首次配置");
+  expect(screen.getByRole("status")).toHaveTextContent("保存前会先验证凭据");
+});
+
+it("shows the safe API error when testing and saving credentials is rejected", async () => {
+  vi.spyOn(apiClient, "request").mockImplementation(async (path) => {
+    if (path === "/api/v1/model-catalog") return catalog;
+    if (path === "/api/v1/adapters/volcengine_ark/test") throw new ApiError("模型凭据验证失败。", 401);
+    return status;
+  });
+  render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}><ProviderSetup /></QueryClientProvider>);
+  await waitFor(() => expect((screen.getByLabelText("多模态语言模型") as HTMLSelectElement).value).toBe(catalog[0].model_id));
+  fireEvent.change(await screen.findByLabelText("火山方舟 API Key"), { target: { value: "ark-test-key" } });
+  fireEvent.click(screen.getByRole("button", { name: "测试并启用" }));
+  expect(await screen.findByRole("alert")).toHaveTextContent("模型凭据验证失败。");
+});
+
+it("shows the safe API error when deleting credentials is rejected", async () => {
+  vi.spyOn(apiClient, "request").mockImplementation(async (path) => {
+    if (path === "/api/v1/model-catalog") return catalog;
+    if (path === "/api/v1/adapters/volcengine_ark/credential") throw new ApiError("凭据删除请求被拒绝。", 409);
+    return { ...status, mode: "cloud", adapter_status: { configured: true, backend: "workspace_secret_file" }, multimodal_model: catalog[0], image_model: catalog[2] };
+  });
+  render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}><ProviderSetup /></QueryClientProvider>);
+  fireEvent.click(await screen.findByRole("button", { name: "删除凭据" }));
+  expect(await screen.findByRole("alert")).toHaveTextContent("凭据删除请求被拒绝。");
 });

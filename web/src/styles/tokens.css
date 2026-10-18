@@ -2,8 +2,9 @@
   color-scheme: dark;
   --bg: #090b10; --surface: #11141b; --surface-2: #171b24; --surface-3: #202632;
   --line: #2a303c; --line-soft: #20252f; --text: #f4f4f1; --muted: #969eab;
-  --accent: #e8ff58; --accent-ink: #171b0b; --danger: #ff6b6b; --warning: #ffbd59;
-  --success: #54d98c; --blue: #77a7ff; --radius: 14px; --radius-sm: 9px;
+  --accent: #8b8cff; --accent-strong: #a9a5ff; --accent-ink: #0d1026; --danger: #ff747f; --warning: #f7bd62;
+  --success: #54d98c; --blue: #77a7ff; --waiting: #d7a6ff; --radius: 14px; --radius-sm: 9px;
+  --space-1: 4px; --space-2: 8px; --space-3: 12px; --space-4: 16px; --space-5: 20px; --space-6: 24px;
   --shadow: 0 20px 60px rgb(0 0 0 / .35); --rail: 224px;
   font-family: Inter, "Noto Sans SC", "Microsoft YaHei", system-ui, sans-serif;
 }

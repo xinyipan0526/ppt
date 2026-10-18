@@ -9,7 +9,7 @@ from typing import Any, Protocol
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Response, status
 from fastapi.encoders import jsonable_encoder
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from ppt_agent.api.security import LocalHTTPSecurity
 from ppt_agent.artifacts.store import ArtifactStore
@@ -30,6 +30,10 @@ Authorizer = Callable[[str], Awaitable[None]]
 class Scheduler(Protocol):
     def schedule(self, run_id: str) -> bool: ...
     async def cancel(self, run_id: str) -> bool: ...
+
+
+class BackgroundScheduler(Protocol):
+    def schedule(self, item_id: str) -> bool: ...
 
 
 class ProductionCreate(BaseModel):
@@ -56,6 +60,16 @@ class ExportCreate(BaseModel):
     format: ExportFormat
     forced: bool = False
     risk_acknowledgement: str | None = Field(default=None, max_length=1_000)
+    jpeg_quality: int = Field(default=92, ge=1, le=100)
+    pdf_dpi: int = Field(default=144, ge=72, le=600)
+
+    @model_validator(mode="after")
+    def validate_quality_options(self) -> "ExportCreate":
+        if self.format not in {"jpg", "jpg_zip"} and self.jpeg_quality != 92:
+            raise ValueError("jpeg_quality is only supported for JPEG exports")
+        if self.format != "pdf" and self.pdf_dpi != 144:
+            raise ValueError("pdf_dpi is only supported for PDF exports")
+        return self
 
 
 class DeckRegenerateCreate(BaseModel):
@@ -71,6 +85,7 @@ def production_router(
     supervisor: Scheduler,
     editing: PageEditingWorkflow,
     exporting: ExportWorkflow,
+    export_supervisor: BackgroundScheduler,
     artifacts: ArtifactStore,
     authorize_project: Authorizer,
     authorize_run: Authorizer,
@@ -154,9 +169,10 @@ def production_router(
         await authorize_run(run_id)
         try:
             accepted = await supervisor.cancel(run_id)
+            run = await asyncio.to_thread(store.get_run, run_id)
         except (LookupError, ValueError) as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
-        return {"run_id": run_id, "status": "cancel_requested", "accepted": accepted}
+        return {"run_id": run_id, "status": run.status.value, "accepted": accepted}
 
     @router.post("/pages/{page_id}/edits", status_code=status.HTTP_202_ACCEPTED)
     async def edit_page(page_id: str, request: PageEditCreate) -> object:
@@ -199,11 +215,17 @@ def production_router(
             export_id = await asyncio.to_thread(
                 exporting.create, run.project_id, run_id, request.format,
                 forced=request.forced, risk_acknowledgement=request.risk_acknowledgement,
+                jpeg_quality=request.jpeg_quality, pdf_dpi=request.pdf_dpi,
             )
-            artifact_id = await asyncio.to_thread(exporting.export, export_id)
+            snapshot = await asyncio.to_thread(exporting.status, export_id)
+            if snapshot.status in {"queued", "running"}:
+                export_supervisor.schedule(export_id)
+                snapshot = await asyncio.to_thread(exporting.status, export_id)
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail="export_not_found") from exc
         except ValueError as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
-        return {"export_id": export_id, "status": "available", "artifact_id": artifact_id}
+            raise HTTPException(status_code=409, detail="export_not_ready") from exc
+        return jsonable_encoder(asdict(snapshot))
 
     @router.get("/exports/{export_id}")
     async def get_export(export_id: str) -> object:

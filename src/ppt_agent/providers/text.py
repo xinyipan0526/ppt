@@ -60,7 +60,7 @@ ProviderErrorCode = Literal[
 ]
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(slots=True)
 class ProviderCallError(Exception):
     code: ProviderErrorCode
     retryable: bool
@@ -75,4 +75,3 @@ class ProviderCallError(Exception):
 
 class StructuredTextProvider(Protocol):
     async def complete(self, request: StructuredTextRequest) -> StructuredTextResult: ...
-

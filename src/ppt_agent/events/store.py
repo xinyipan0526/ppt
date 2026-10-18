@@ -11,6 +11,7 @@ from sqlalchemy import delete, select
 from ppt_agent.domain.events import EventDurability
 from ppt_agent.events.persistence import append_event_record
 from ppt_agent.events.policy import EventPayloadRejected
+from ppt_agent.operations.provider import safe_provider_failure_error
 from ppt_agent.storage.database import SessionFactory, session_scope
 from ppt_agent.storage.models import (
     PageRecord,
@@ -49,6 +50,7 @@ class RunView:
     workflow_name: str
     workflow_version: int
     status: str
+    error: dict[str, object] | None
     retry_at: datetime | None
     recovery_metadata: dict[str, Any] | None
 
@@ -150,6 +152,11 @@ class WorkflowEventStore:
                     workflow_name=run.workflow_name,
                     workflow_version=run.workflow_version,
                     status=run.status.value,
+                    error=(
+                        None
+                        if run.error is None
+                        else safe_provider_failure_error(run.error)
+                    ),
                     retry_at=run.retry_at,
                     recovery_metadata=run.recovery_metadata,
                 ),
@@ -163,7 +170,11 @@ class WorkflowEventStore:
                             "attempt_count": step.attempt_count,
                             "input_refs": step.input_refs,
                             "output_refs": step.output_refs,
-                            "error": step.error,
+                            "error": (
+                                None
+                                if step.error is None
+                                else safe_provider_failure_error(step.error)
+                            ),
                             "retry_at": step.retry_at,
                             "recovery_metadata": step.recovery_metadata,
                         },
@@ -181,7 +192,11 @@ class WorkflowEventStore:
                             ),
                             "page_spec_version_id": page.page_spec_version_id,
                             "current_artifact_id": page.current_artifact_id,
-                            "error": page.error,
+                            "error": (
+                                None
+                                if page.error is None
+                                else safe_provider_failure_error(page.error)
+                            ),
                             "recovery_metadata": page.recovery_metadata,
                         },
                     )

@@ -14,8 +14,10 @@ from ppt_agent.storage.database import (
     DatabaseConfig,
     create_session_factory,
     create_sqlite_engine,
+    session_scope,
 )
-from ppt_agent.storage.models import Base
+from ppt_agent.storage.models import Base, PageRecord, WorkflowRunRecord, WorkflowStepRecord
+from ppt_agent.domain.state_machine import PageStatus, StepStatus
 
 
 def create_services() -> tuple[WorkflowRepository, WorkflowEventStore, object]:
@@ -146,6 +148,66 @@ def test_snapshot_and_sse_routes_authorize_run_and_honor_last_event_id() -> None
     assert snapshot["run"]["status"] == "queued"
     assert "event: cursor_expired" in body
     assert authorized == [snapshot["run"]["id"], snapshot["run"]["id"]]
+
+
+def test_snapshot_route_redacts_raw_errors_for_run_step_and_page() -> None:
+    """Browser snapshot JSON must never disclose persisted Provider payloads."""
+
+    async def scenario() -> str:
+        repository, store, engine = create_services()
+        try:
+            run_id = create_run(repository)
+            with session_scope(repository._sessions) as session:
+                run = session.get(WorkflowRunRecord, run_id)
+                assert run is not None
+                run.error = {
+                    "code": "invalid_request",
+                    "provider_summary": {"http_status": 400, "prompt": "run secret"},
+                    "response": "run response",
+                    "api_key": "run key",
+                }
+                session.add_all([
+                    WorkflowStepRecord(
+                        id="step-sensitive", run_id=run_id, step_key="brief", generation=1,
+                        status=StepStatus.FAILED, attempt_count=1,
+                        idempotency_key="step-sensitive-key", input_refs=None, output_refs=None,
+                        error={"code": "invalid_request", "prompt": "step secret", "response": "step response", "api_key": "step key"},
+                        retry_at=None, recovery_metadata=None,
+                    ),
+                    PageRecord(
+                        id="page-sensitive", run_id=run_id, page_index=0,
+                        status=PageStatus.FAILED, page_stage=None, page_spec_version_id=None,
+                        current_artifact_id=None,
+                        error={"code": "invalid_request", "prompt": "page secret", "response": "page response", "api_key": "page key"},
+                        recovery_metadata=None,
+                    ),
+                ])
+            async def authorize(_run_id: str) -> None:
+                return None
+            app = create_app(
+                event_stream=EventStreamService(store),
+                authorize_run=authorize,
+                security=LocalHTTPSecurity(token="t" * 32),
+            )
+            async with AsyncClient(
+                transport=ASGITransport(app=app), base_url="http://localhost:8000",
+                headers={"Authorization": f"Bearer {'t' * 32}"},
+            ) as client:
+                response = await client.get(f"/api/v1/runs/{run_id}/snapshot")
+            assert response.status_code == 200
+            return response.text
+        finally:
+            engine.dispose()
+
+    response_text = asyncio.run(scenario())
+
+    for secret in (
+        "run secret", "run response", "run key", "step secret", "step response",
+        "step key", "page secret", "page response", "page key",
+    ):
+        assert secret not in response_text
+    assert '"step_key":"brief"' in response_text
+    assert '"page_index":0' in response_text
 
 
 def test_unknown_run_event_route_returns_404_before_stream_starts() -> None:

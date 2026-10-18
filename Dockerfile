@@ -24,8 +24,10 @@ RUN useradd --create-home --uid 10001 pptagent \
     && chown -R pptagent:pptagent /data /app
 USER pptagent
 
-ENV PPT_AGENT_WORKSPACE=/data PPT_AGENT_HOST=0.0.0.0 PPT_AGENT_PORT=8000
+ENV PPT_AGENT_WORKSPACE=/data PPT_AGENT_HOST=0.0.0.0 PPT_AGENT_PORT=8000 PPT_AGENT_PRODUCTION=true
 VOLUME ["/data"]
 EXPOSE 8000
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/v1/ready', timeout=4).close()"
 ENTRYPOINT ["ppt-agent"]
 CMD ["serve"]
